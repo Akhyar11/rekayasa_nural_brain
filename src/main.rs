@@ -4,8 +4,9 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
 use rekayasa_nural_brain::{
     ActiveTickSnapshot, BrainConfig, BrainEdgeSummary, BrainState, BrainSummary, ConnectionSummary,
     InteractionReport, SimulationConfig, SimulationError, SimulationReport, SpikingTokenizer,
@@ -39,6 +40,9 @@ struct TrainRuntimeOptions {
     state_path: PathBuf,
     file_path: PathBuf,
     limit: Option<usize>,
+    verbose: bool,
+    log_every: usize,
+    show_progress: bool,
     config: BrainConfig,
 }
 
@@ -48,6 +52,10 @@ struct InspectRuntimeOptions {
 
 struct TrainingBatchSummary {
     examples: usize,
+    prompt_tokens: usize,
+    response_tokens: usize,
+    max_prompt_tokens: usize,
+    max_response_tokens: usize,
     new_sensor_tokens: usize,
     new_word_tokens: usize,
     new_phrase_tokens: usize,
@@ -55,6 +63,35 @@ struct TrainingBatchSummary {
     new_edges: usize,
     pruned_edges: usize,
     pruned_context_nodes: usize,
+}
+
+struct TrainStateSnapshot {
+    interactions: u64,
+    token_count: usize,
+    sensor_token_count: usize,
+    word_token_count: usize,
+    phrase_token_count: usize,
+    context_node_count: usize,
+    edge_count: usize,
+    remembered_utterances: usize,
+    remembered_prompts: usize,
+    remembered_pairs: usize,
+}
+
+struct TrainReporter {
+    progress_bar: Option<ProgressBar>,
+    total_examples: usize,
+    verbose: bool,
+    log_every: usize,
+    started_at: Instant,
+}
+
+struct TrainingRunReport<'a> {
+    original_example_count: usize,
+    effective_example_count: usize,
+    elapsed: Duration,
+    initial_state: &'a TrainStateSnapshot,
+    final_state: &'a TrainStateSnapshot,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,6 +265,9 @@ where
         state_path: PathBuf::from(".brain/brain_state.bin"),
         file_path: PathBuf::from("training/id_personachat/id_personachat.json"),
         limit: None,
+        verbose: false,
+        log_every: 100,
+        show_progress: io::stderr().is_terminal(),
         config: BrainConfig::default(),
     };
 
@@ -241,8 +281,17 @@ where
                 options.file_path = PathBuf::from(next_value(&mut args, "--file")?);
             }
             "--limit" => {
-                options.limit = Some(parse_usize(&next_value(&mut args, "--limit")?, "--limit")?);
+                options.limit = Some(parse_non_zero_usize(
+                    &next_value(&mut args, "--limit")?,
+                    "--limit",
+                )?);
             }
+            "--verbose" => options.verbose = true,
+            "--log-every" => {
+                options.log_every =
+                    parse_non_zero_usize(&next_value(&mut args, "--log-every")?, "--log-every")?;
+            }
+            "--no-progress" => options.show_progress = false,
             _ => {
                 if !apply_brain_config_arg(&mut options.config, &arg, &mut args)? {
                     return Err(format!("argumen train tidak dikenali: {arg}"));
@@ -471,6 +520,7 @@ fn run_train(options: TrainRuntimeOptions) -> ExitCode {
         }
     };
 
+    let initial_state = capture_train_state(&brain);
     let mut examples = match load_training_examples(&options.file_path) {
         Ok(examples) => examples,
         Err(error) => {
@@ -490,14 +540,35 @@ fn run_train(options: TrainRuntimeOptions) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    let original_example_count = examples.len();
     if let Some(limit) = options.limit
         && examples.len() > limit
     {
         examples.truncate(limit);
     }
+    let effective_example_count = examples.len();
+
+    let reporter = TrainReporter::new(
+        effective_example_count,
+        options.verbose,
+        options.log_every,
+        options.show_progress,
+    );
+    print_training_start(
+        &reporter,
+        &options.file_path,
+        &options.state_path,
+        original_example_count,
+        effective_example_count,
+        &initial_state,
+    );
 
     let mut summary = TrainingBatchSummary {
         examples: 0,
+        prompt_tokens: 0,
+        response_tokens: 0,
+        max_prompt_tokens: 0,
+        max_response_tokens: 0,
         new_sensor_tokens: 0,
         new_word_tokens: 0,
         new_phrase_tokens: 0,
@@ -507,23 +578,41 @@ fn run_train(options: TrainRuntimeOptions) -> ExitCode {
         pruned_context_nodes: 0,
     };
 
-    for (line_number, prompt, response) in examples {
+    for (index, (line_number, prompt, response)) in examples.into_iter().enumerate() {
+        let example_index = index + 1;
         let report = match brain.train_pair(&prompt, &response) {
             Ok(report) => report,
             Err(error) => {
+                reporter.abort();
                 eprintln!("Training gagal pada baris {line_number}: {error}");
                 return ExitCode::FAILURE;
             }
         };
         accumulate_training_summary(&mut summary, &report);
+        reporter.record(example_index, line_number, &report, &summary, &brain);
     }
 
     if let Err(error) = brain.save_to_path(&options.state_path) {
+        reporter.abort();
         eprintln!("Gagal menyimpan brain state: {error}");
         return ExitCode::FAILURE;
     }
 
-    print_training_summary(&summary, &options.file_path, &options.state_path);
+    reporter.finish();
+    let final_state = capture_train_state(&brain);
+    let run_report = TrainingRunReport {
+        original_example_count,
+        effective_example_count,
+        elapsed: reporter.elapsed(),
+        initial_state: &initial_state,
+        final_state: &final_state,
+    };
+    print_training_summary(
+        &summary,
+        &options.file_path,
+        &options.state_path,
+        &run_report,
+    );
     ExitCode::SUCCESS
 }
 
@@ -555,6 +644,15 @@ fn parse_usize(value: &str, flag: &str) -> Result<usize, String> {
     value
         .parse::<usize>()
         .map_err(|_| format!("{flag} harus berupa integer tak negatif"))
+}
+
+fn parse_non_zero_usize(value: &str, flag: &str) -> Result<usize, String> {
+    let parsed = parse_usize(value, flag)?;
+    if parsed == 0 {
+        Err(format!("{flag} harus lebih besar dari 0"))
+    } else {
+        Ok(parsed)
+    }
 }
 
 fn parse_u64(value: &str, flag: &str) -> Result<u64, String> {
@@ -675,6 +773,10 @@ fn print_interaction_report(report: &InteractionReport) {
 
 fn accumulate_training_summary(summary: &mut TrainingBatchSummary, report: &TrainingExampleReport) {
     summary.examples += 1;
+    summary.prompt_tokens += report.prompt_token_count;
+    summary.response_tokens += report.response_token_count;
+    summary.max_prompt_tokens = summary.max_prompt_tokens.max(report.prompt_token_count);
+    summary.max_response_tokens = summary.max_response_tokens.max(report.response_token_count);
     summary.new_sensor_tokens += report.new_sensor_tokens.len();
     summary.new_word_tokens += report.new_word_tokens.len();
     summary.new_phrase_tokens += report.new_phrase_tokens.len();
@@ -684,11 +786,72 @@ fn accumulate_training_summary(summary: &mut TrainingBatchSummary, report: &Trai
     summary.pruned_context_nodes += report.pruned_context_nodes;
 }
 
-fn print_training_summary(summary: &TrainingBatchSummary, file_path: &Path, state_path: &Path) {
+fn print_training_start(
+    reporter: &TrainReporter,
+    file_path: &Path,
+    state_path: &Path,
+    original_example_count: usize,
+    effective_example_count: usize,
+    initial_state: &TrainStateSnapshot,
+) {
+    reporter.println("Training started");
+    reporter.println(&format!("training file       : {}", file_path.display()));
+    reporter.println(&format!("state file          : {}", state_path.display()));
+    reporter.println(&format!("dataset examples    : {}", original_example_count));
+    reporter.println(&format!(
+        "effective examples  : {}",
+        effective_example_count
+    ));
+    reporter.println(&format!(
+        "monitoring          : progress {} | verbose {} | log every {}",
+        yes_no(reporter.progress_bar.is_some()),
+        yes_no(reporter.verbose),
+        reporter.log_every
+    ));
+    reporter.println(&format!(
+        "initial state       : interactions {} | tokens {} | ctx {} | edges {} | exact prompts {} | exact pairs {}",
+        initial_state.interactions,
+        initial_state.token_count,
+        initial_state.context_node_count,
+        initial_state.edge_count,
+        initial_state.remembered_prompts,
+        initial_state.remembered_pairs
+    ));
+}
+
+fn print_training_summary(
+    summary: &TrainingBatchSummary,
+    file_path: &Path,
+    state_path: &Path,
+    run_report: &TrainingRunReport<'_>,
+) {
     println!("Training completed");
     println!("training file       : {}", file_path.display());
     println!("state file          : {}", state_path.display());
-    println!("examples            : {}", summary.examples);
+    println!(
+        "examples            : {} / {}",
+        run_report.effective_example_count, run_report.original_example_count
+    );
+    println!(
+        "duration            : {}",
+        HumanDuration(run_report.elapsed)
+    );
+    println!(
+        "average rate        : {:.2} examples/s",
+        calculate_example_rate(summary.examples, run_report.elapsed)
+    );
+    println!("prompt tokens total : {}", summary.prompt_tokens);
+    println!("response tokens total: {}", summary.response_tokens);
+    println!(
+        "avg prompt tokens   : {:.2}",
+        average_tokens(summary.prompt_tokens, summary.examples)
+    );
+    println!(
+        "avg response tokens : {:.2}",
+        average_tokens(summary.response_tokens, summary.examples)
+    );
+    println!("max prompt tokens   : {}", summary.max_prompt_tokens);
+    println!("max response tokens : {}", summary.max_response_tokens);
     println!("new sensor tokens   : {}", summary.new_sensor_tokens);
     println!("new word tokens     : {}", summary.new_word_tokens);
     println!("new phrase tokens   : {}", summary.new_phrase_tokens);
@@ -696,6 +859,295 @@ fn print_training_summary(summary: &TrainingBatchSummary, file_path: &Path, stat
     println!("new edges           : {}", summary.new_edges);
     println!("pruned edges        : {}", summary.pruned_edges);
     println!("pruned context      : {}", summary.pruned_context_nodes);
+    println!(
+        "interactions total  : {} -> {} (+{})",
+        run_report.initial_state.interactions,
+        run_report.final_state.interactions,
+        run_report
+            .final_state
+            .interactions
+            .saturating_sub(run_report.initial_state.interactions)
+    );
+    println!(
+        "tokens total        : {} -> {} (+{})",
+        run_report.initial_state.token_count,
+        run_report.final_state.token_count,
+        run_report
+            .final_state
+            .token_count
+            .saturating_sub(run_report.initial_state.token_count)
+    );
+    println!(
+        "sensor tokens       : {} -> {} (+{})",
+        run_report.initial_state.sensor_token_count,
+        run_report.final_state.sensor_token_count,
+        run_report
+            .final_state
+            .sensor_token_count
+            .saturating_sub(run_report.initial_state.sensor_token_count)
+    );
+    println!(
+        "word tokens         : {} -> {} (+{})",
+        run_report.initial_state.word_token_count,
+        run_report.final_state.word_token_count,
+        run_report
+            .final_state
+            .word_token_count
+            .saturating_sub(run_report.initial_state.word_token_count)
+    );
+    println!(
+        "phrase tokens       : {} -> {} (+{})",
+        run_report.initial_state.phrase_token_count,
+        run_report.final_state.phrase_token_count,
+        run_report
+            .final_state
+            .phrase_token_count
+            .saturating_sub(run_report.initial_state.phrase_token_count)
+    );
+    println!(
+        "context nodes total : {} -> {} (+{})",
+        run_report.initial_state.context_node_count,
+        run_report.final_state.context_node_count,
+        run_report
+            .final_state
+            .context_node_count
+            .saturating_sub(run_report.initial_state.context_node_count)
+    );
+    println!(
+        "edges total         : {} -> {} (+{})",
+        run_report.initial_state.edge_count,
+        run_report.final_state.edge_count,
+        run_report
+            .final_state
+            .edge_count
+            .saturating_sub(run_report.initial_state.edge_count)
+    );
+    println!(
+        "remembered prompts  : {} -> {} (+{})",
+        run_report.initial_state.remembered_prompts,
+        run_report.final_state.remembered_prompts,
+        run_report
+            .final_state
+            .remembered_prompts
+            .saturating_sub(run_report.initial_state.remembered_prompts)
+    );
+    println!(
+        "remembered pairs    : {} -> {} (+{})",
+        run_report.initial_state.remembered_pairs,
+        run_report.final_state.remembered_pairs,
+        run_report
+            .final_state
+            .remembered_pairs
+            .saturating_sub(run_report.initial_state.remembered_pairs)
+    );
+    println!(
+        "remembered inputs   : {} -> {} (+{})",
+        run_report.initial_state.remembered_utterances,
+        run_report.final_state.remembered_utterances,
+        run_report
+            .final_state
+            .remembered_utterances
+            .saturating_sub(run_report.initial_state.remembered_utterances)
+    );
+}
+
+impl TrainReporter {
+    fn new(total_examples: usize, verbose: bool, log_every: usize, show_progress: bool) -> Self {
+        let progress_bar = if show_progress {
+            let bar = ProgressBar::new(total_examples as u64);
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos:>7}/{len:7} {percent:>3}% | {per_sec:>12} | ETA {eta_precise} | {msg}",
+                )
+                .expect("progress bar template harus valid")
+                .progress_chars("=> "),
+            );
+            bar.enable_steady_tick(Duration::from_millis(120));
+            Some(bar)
+        } else {
+            None
+        };
+
+        Self {
+            progress_bar,
+            total_examples,
+            verbose,
+            log_every,
+            started_at: Instant::now(),
+        }
+    }
+
+    fn record(
+        &self,
+        example_index: usize,
+        line_number: usize,
+        report: &TrainingExampleReport,
+        summary: &TrainingBatchSummary,
+        brain: &BrainState,
+    ) {
+        if let Some(progress_bar) = &self.progress_bar {
+            progress_bar.inc(1);
+            progress_bar.set_message(format!(
+                "last +s{} +w{} +p{} +c{} +e{} -e{} -c{}",
+                report.new_sensor_tokens.len(),
+                report.new_word_tokens.len(),
+                report.new_phrase_tokens.len(),
+                report.new_context_nodes.len(),
+                report.new_edges,
+                report.pruned_edges,
+                report.pruned_context_nodes
+            ));
+        }
+
+        if !self.should_log(example_index) {
+            return;
+        }
+
+        let elapsed = self.elapsed();
+        let state = capture_train_state(brain);
+        self.println(&format!(
+            "checkpoint {:>7}/{:>7} | sumber #{line_number} | elapsed {} | rate {:.2} ex/s | prompt tok {} | response tok {} | growth +s{} +w{} +p{} +c{} +e{} -e{} -c{} | state tok {} ctx {} edge {} exact {}",
+            example_index,
+            self.total_examples,
+            HumanDuration(elapsed),
+            calculate_example_rate(example_index, elapsed),
+            report.prompt_token_count,
+            report.response_token_count,
+            report.new_sensor_tokens.len(),
+            report.new_word_tokens.len(),
+            report.new_phrase_tokens.len(),
+            report.new_context_nodes.len(),
+            report.new_edges,
+            report.pruned_edges,
+            report.pruned_context_nodes,
+            state.token_count,
+            state.context_node_count,
+            state.edge_count,
+            state.remembered_pairs
+        ));
+        self.println(&format!(
+            "cumulative          : examples {} | prompt tok {} | response tok {} | new sensor {} | new word {} | new phrase {} | new context {} | new edges {} | pruned edges {} | pruned context {}",
+            summary.examples,
+            summary.prompt_tokens,
+            summary.response_tokens,
+            summary.new_sensor_tokens,
+            summary.new_word_tokens,
+            summary.new_phrase_tokens,
+            summary.new_context_nodes,
+            summary.new_edges,
+            summary.pruned_edges,
+            summary.pruned_context_nodes
+        ));
+
+        if self.verbose {
+            self.println(&format!(
+                "prompt> {}",
+                truncate_for_log(&report.prompt, 120)
+            ));
+            self.println(&format!(
+                "response> {}",
+                truncate_for_log(&report.response, 120)
+            ));
+        }
+    }
+
+    fn should_log(&self, example_index: usize) -> bool {
+        example_index == 1
+            || example_index == self.total_examples
+            || example_index.is_multiple_of(self.log_every)
+    }
+
+    fn println(&self, line: &str) {
+        if let Some(progress_bar) = &self.progress_bar {
+            progress_bar.println(line);
+        } else {
+            println!("{line}");
+        }
+    }
+
+    fn finish(&self) {
+        if let Some(progress_bar) = &self.progress_bar {
+            progress_bar.finish_with_message("training selesai");
+        }
+    }
+
+    fn abort(&self) {
+        if let Some(progress_bar) = &self.progress_bar {
+            progress_bar.abandon_with_message("training dibatalkan");
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+}
+
+fn capture_train_state(brain: &BrainState) -> TrainStateSnapshot {
+    let mut sensor_token_count = 0;
+    let mut word_token_count = 0;
+    let mut phrase_token_count = 0;
+
+    for token in brain.tokenizer.entries.values() {
+        match token.level {
+            rekayasa_nural_brain::brain::TokenLevel::Sensor => sensor_token_count += 1,
+            rekayasa_nural_brain::brain::TokenLevel::Word => word_token_count += 1,
+            rekayasa_nural_brain::brain::TokenLevel::Phrase => phrase_token_count += 1,
+        }
+    }
+
+    TrainStateSnapshot {
+        interactions: brain.interaction_count,
+        token_count: brain.tokenizer.entries.len(),
+        sensor_token_count,
+        word_token_count,
+        phrase_token_count,
+        context_node_count: brain
+            .nodes
+            .values()
+            .filter(|node| node.kind == rekayasa_nural_brain::brain::NodeKind::Context)
+            .count(),
+        edge_count: brain.edges.len(),
+        remembered_utterances: brain.recent_utterances.len(),
+        remembered_prompts: brain.prompt_response_memory.len(),
+        remembered_pairs: brain
+            .prompt_response_memory
+            .values()
+            .map(|responses| responses.len())
+            .sum(),
+    }
+}
+
+fn average_tokens(total_tokens: usize, examples: usize) -> f64 {
+    if examples == 0 {
+        0.0
+    } else {
+        total_tokens as f64 / examples as f64
+    }
+}
+
+fn calculate_example_rate(examples: usize, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if examples == 0 || seconds <= f64::EPSILON {
+        0.0
+    } else {
+        examples as f64 / seconds
+    }
+}
+
+fn truncate_for_log(text: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, character) in text.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("...");
+            break;
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "ya" } else { "tidak" }
 }
 
 fn print_brain_summary(summary: &BrainSummary) {
@@ -883,9 +1335,12 @@ Usage:
   cargo run -- train [options]
 
 Options:
-  --file <path>                   File training TSV prompt-response
+  --file <path>                   File training JSON atau TSV
   --state <path>                  Lokasi file state brain
   --limit <n>                     Batasi jumlah contoh training yang diproses
+  --verbose                       Tampilkan prompt-response di checkpoint log
+  --log-every <n>                 Cetak checkpoint detail tiap n contoh
+  --no-progress                   Nonaktifkan progress bar terminal
   --word-threshold <n>            Batas kemunculan sebelum kata dipromosikan
   --phrase-threshold <n>          Batas kemunculan sebelum frasa dipromosikan
   --context-threshold <n>         Batas kemunculan sebelum context node dibuat
@@ -898,12 +1353,13 @@ Options:
   --memory-window <n>             Jumlah input yang diingat
 
 Format file:
-  prompt<TAB>response
+  JSON PersonaChat atau prompt<TAB>response
 
 Examples:
   cargo run -- train
   cargo run -- train --file training/id_personachat/id_personachat.json
   cargo run -- train --file training/id_personachat/id_personachat.json --limit 500
+  cargo run -- train --verbose --log-every 25
   cargo run -- train --state data/brain.bin --file training/id_personachat/id_personachat.json
 "
 }

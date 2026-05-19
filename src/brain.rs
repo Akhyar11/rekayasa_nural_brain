@@ -4,9 +4,10 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
+const LEGACY_STATE_VERSION_V1: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BrainConfig {
@@ -379,6 +380,36 @@ pub struct BrainState {
     pub recent_utterances: VecDeque<UtteranceMemory>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LegacyBrainStateV1 {
+    pub state_version: u32,
+    pub config: BrainConfig,
+    pub next_node_id: u64,
+    pub interaction_count: u64,
+    pub tokenizer: AdaptiveTokenizer,
+    pub nodes: BTreeMap<u64, BrainNode>,
+    pub edges: BTreeMap<String, BrainEdge>,
+    pub context_patterns: BTreeMap<String, ContextPattern>,
+    pub recent_utterances: VecDeque<UtteranceMemory>,
+}
+
+impl From<LegacyBrainStateV1> for BrainState {
+    fn from(legacy: LegacyBrainStateV1) -> Self {
+        Self {
+            state_version: STATE_VERSION,
+            config: legacy.config,
+            next_node_id: legacy.next_node_id,
+            interaction_count: legacy.interaction_count,
+            tokenizer: legacy.tokenizer,
+            nodes: legacy.nodes,
+            edges: legacy.edges,
+            context_patterns: legacy.context_patterns,
+            prompt_response_memory: BTreeMap::new(),
+            recent_utterances: legacy.recent_utterances,
+        }
+    }
+}
+
 impl BrainState {
     pub fn new(config: BrainConfig) -> Result<Self, BrainError> {
         config.validate()?;
@@ -409,13 +440,35 @@ impl BrainState {
 
     pub fn load_from_path(path: &Path) -> Result<Self, BrainError> {
         let bytes = fs::read(path)?;
-        let (state, _bytes_read): (Self, usize) =
-            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())?;
-        if state.state_version != STATE_VERSION {
-            return Err(BrainError::UnsupportedStateVersion(state.state_version));
+        match bincode::serde::decode_from_slice::<Self, _>(&bytes, bincode::config::standard()) {
+            Ok((mut state, _bytes_read)) => {
+                match state.state_version {
+                    STATE_VERSION => {}
+                    LEGACY_STATE_VERSION_V1 => {
+                        state.state_version = STATE_VERSION;
+                    }
+                    version => return Err(BrainError::UnsupportedStateVersion(version)),
+                }
+                state.config.validate()?;
+                Ok(state)
+            }
+            Err(current_error) => {
+                match bincode::serde::decode_from_slice::<LegacyBrainStateV1, _>(
+                    &bytes,
+                    bincode::config::standard(),
+                ) {
+                    Ok((legacy, _bytes_read)) => {
+                        if legacy.state_version != LEGACY_STATE_VERSION_V1 {
+                            return Err(BrainError::UnsupportedStateVersion(legacy.state_version));
+                        }
+                        let state: Self = legacy.into();
+                        state.config.validate()?;
+                        Ok(state)
+                    }
+                    Err(_) => Err(BrainError::Decode(current_error)),
+                }
+            }
         }
-        state.config.validate()?;
-        Ok(state)
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<(), BrainError> {
@@ -425,7 +478,9 @@ impl BrainState {
             fs::create_dir_all(parent)?;
         }
         let payload = bincode::serde::encode_to_vec(self, bincode::config::standard())?;
-        fs::write(path, payload)?;
+        let temp_path = temporary_state_path(path);
+        fs::write(&temp_path, payload)?;
+        fs::rename(&temp_path, path)?;
         Ok(())
     }
 
@@ -1317,9 +1372,20 @@ fn is_punctuation_or_space(character: char) -> bool {
     character.is_whitespace() || character.is_ascii_punctuation()
 }
 
+fn temporary_state_path(path: &Path) -> PathBuf {
+    match path.file_name() {
+        Some(file_name) => {
+            let mut temp_name = file_name.to_os_string();
+            temp_name.push(".tmp");
+            path.with_file_name(temp_name)
+        }
+        None => path.with_extension("tmp"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BrainConfig, BrainState, TokenLevel, normalize_input};
+    use super::{BrainConfig, BrainState, LegacyBrainStateV1, TokenLevel, normalize_input};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1428,5 +1494,39 @@ mod tests {
         assert!(training.prompt_token_count > 0);
         assert!(training.response_token_count > 0);
         assert!(response.contains("langit") || response.contains("berwarna"));
+    }
+
+    #[test]
+    fn load_legacy_binary_state_and_migrate() {
+        let legacy = LegacyBrainStateV1 {
+            state_version: super::LEGACY_STATE_VERSION_V1,
+            config: BrainConfig::default(),
+            next_node_id: 1,
+            interaction_count: 7,
+            tokenizer: super::AdaptiveTokenizer::default(),
+            nodes: Default::default(),
+            edges: Default::default(),
+            context_patterns: Default::default(),
+            recent_utterances: Default::default(),
+        };
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "rekayasa_nural_brain_legacy_test_{}.bin",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be valid")
+                .as_nanos()
+        ));
+
+        let payload = bincode::serde::encode_to_vec(&legacy, bincode::config::standard())
+            .expect("legacy encoding should pass");
+        std::fs::write(&temp_path, payload).expect("legacy temp file write should pass");
+
+        let migrated = BrainState::load_from_path(&temp_path).expect("legacy load should pass");
+        std::fs::remove_file(&temp_path).expect("temp file should be removable");
+
+        assert_eq!(migrated.state_version, super::STATE_VERSION);
+        assert_eq!(migrated.interaction_count, 7);
+        assert!(migrated.prompt_response_memory.is_empty());
     }
 }

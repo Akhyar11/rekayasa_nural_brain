@@ -22,10 +22,18 @@ Default `train` sekarang memakai dataset:
 training/id_personachat/id_personachat.json
 ```
 
+Selama `train`, CLI sekarang menampilkan progress bar, checkpoint periodik, throughput, dan ringkasan pertumbuhan state.
+
 Bootstrap dari file sendiri:
 
 ```bash
 cargo run -- train --file training/bootstrap_seed.tsv
+```
+
+Monitoring lebih detail:
+
+```bash
+cargo run -- train --verbose --log-every 25
 ```
 
 Setelah itu baru chat:

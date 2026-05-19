@@ -47,7 +47,7 @@ cargo run -- simulate --input "spiking brain"
 
 ## Mode Train
 
-Mode `train` membaca file TSV pasangan `prompt<TAB>response` dan menanamkan pola jawaban awal ke brain.
+Mode `train` membaca dataset JSON PersonaChat atau file TSV `prompt<TAB>response`, lalu menanamkan pola jawaban awal ke brain.
 
 Default file training:
 
@@ -60,6 +60,9 @@ Argumen penting:
 - `--file <path>`: lokasi file training
 - `--state <path>`: lokasi file state
 - `--limit <n>`: batasi jumlah contoh yang diproses
+- `--verbose`: tampilkan potongan prompt-response di checkpoint log
+- `--log-every <n>`: interval checkpoint detail saat training
+- `--no-progress`: nonaktifkan progress bar terminal
 - semua argumen growth yang tersedia di mode `chat`
 
 Contoh:
@@ -72,11 +75,21 @@ cargo run -- train
 cargo run -- train --file training/id_personachat/id_personachat.json --limit 500
 ```
 
+```bash
+cargo run -- train --limit 1000 --verbose --log-every 25
+```
+
 Catatan dataset JSON:
 
 - untuk `id_personachat`, trainer mengambil `history` terakhir sebagai prompt
 - trainer mengambil kandidat terakhir sebagai response target
 - file TSV manual masih tetap didukung untuk seed khusus
+
+Output monitoring saat `train`:
+
+- progress bar dengan contoh terproses, persentase, throughput, ETA, dan growth terakhir
+- checkpoint periodik yang menampilkan token prompt/response, pertumbuhan graph, dan ukuran state saat ini
+- ringkasan akhir yang menampilkan durasi, rata-rata contoh per detik, dan delta state sebelum/sesudah training
 
 ## Mode Chat
 
@@ -151,6 +164,7 @@ Mode `train` akan:
 - membaca pasangan prompt-response dari file
 - menanamkan exact prompt-response memory
 - memperkuat graph dan pola konteks
+- menampilkan progress bar dan checkpoint monitoring selama proses training
 - menyimpan state biner hasil bootstrap
 
 Runtime akan gagal cepat untuk:
