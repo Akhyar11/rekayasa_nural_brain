@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::brain::learning::normalize_input;
+    use crate::brain::{BrainConfig, BrainState, STATE_VERSION};
     use crate::brain::state::{
-        BrainConfig, BrainState, LegacyBrainStateV1, LegacyBrainStateV2, STATE_VERSION,
+        LegacyBrainStateV1, LegacyBrainStateV2,
         LEGACY_STATE_VERSION_V1, LEGACY_STATE_VERSION_V2,
     };
     use crate::brain::tokenizer::{TokenLevel, TokenTrie};
@@ -231,11 +232,86 @@ mod tests {
 
     #[test]
     fn jaccard_similarity_calculation() {
-        use crate::brain::generation::jaccard_similarity;
+        use crate::brain::jaccard_similarity;
         let a = vec![1, 2, 3];
         let b = vec![2, 3, 4];
         let sim = jaccard_similarity(&a, &b);
         // Intersection = [2, 3] (len 2), Union = [1, 2, 3, 4] (len 4) => 2/4 = 0.5
         assert_eq!(sim, 0.5);
+    }
+
+    #[test]
+    fn deterministic_random_projection_vectors() {
+        use crate::brain::similarity::RandomProjectionVector;
+
+        let vec1 = RandomProjectionVector::for_token(42);
+        let vec2 = RandomProjectionVector::for_token(42);
+        let vec3 = RandomProjectionVector::for_token(100);
+
+        // Determinism check
+        assert_eq!(vec1.values, vec2.values);
+        // Distance check
+        let sim_same = vec1.cosine_similarity(&vec2);
+        let sim_diff = vec1.cosine_similarity(&vec3);
+
+        assert!((sim_same - 1.0).abs() < 1e-5);
+        assert!(sim_diff < 1.0);
+
+        let agg = RandomProjectionVector::aggregate(&[vec1, vec3]);
+        assert_eq!(agg.values.len(), RandomProjectionVector::DIM);
+    }
+
+    #[test]
+    fn sampling_mechanics() {
+        use crate::brain::sampling::sample_next_token;
+        use crate::brain::{GenerationConfig, TokenCandidate, CandidateSource};
+
+        let candidates = vec![
+            TokenCandidate {
+                token_id: 1,
+                score: 10.0,
+                probability: 0.7,
+                occurrences: 5,
+                source: CandidateSource::ContextPattern,
+            },
+            TokenCandidate {
+                token_id: 2,
+                score: 5.0,
+                probability: 0.2,
+                occurrences: 2,
+                source: CandidateSource::TransitionEdge,
+            },
+            TokenCandidate {
+                token_id: 3,
+                score: 1.0,
+                probability: 0.1,
+                occurrences: 1,
+                source: CandidateSource::SoftRecall,
+            },
+        ];
+
+        let config = GenerationConfig {
+            temperature: 0.0,
+            top_k: 1,
+            top_p: 0.9,
+            repetition_penalty: 1.0,
+            randomness_seed: Some(42),
+            ..Default::default()
+        };
+
+        let sampled = sample_next_token(&candidates, &config);
+        assert_eq!(sampled, Some(1));
+    }
+
+    #[test]
+    fn probability_normalization_and_entropy() {
+        use crate::brain::probability::{calculate_smoothed_probability, entropy};
+
+        let p1 = calculate_smoothed_probability(2, 10, 3, 1.0); // (2+1)/(10+3) = 3/13
+        assert!((p1 - (3.0 / 13.0)).abs() < 1e-5);
+
+        let probs = vec![0.5, 0.5];
+        let ent = entropy(&probs);
+        assert!((ent - 0.69314718).abs() < 1e-5);
     }
 }

@@ -1,8 +1,10 @@
 use std::fs;
 use std::path::Path;
 
+use super::config::BrainConfig;
+use super::error::BrainError;
 use super::state::{
-    temporary_state_path, BrainConfig, BrainError, BrainState, LegacyBrainStateV1, LegacyBrainStateV2,
+    temporary_state_path, BrainState, LegacyBrainStateV1, LegacyBrainStateV2,
     LEGACY_STATE_VERSION_V1, LEGACY_STATE_VERSION_V2, STATE_VERSION,
 };
 

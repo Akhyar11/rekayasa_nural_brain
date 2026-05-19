@@ -58,11 +58,15 @@ enum DumpMode {
     Summary,
     Tokens,
     Edges,
+    Contexts,
+    Memory,
+    Distribution,
 }
 
 struct DumpRuntimeOptions {
     state_path: PathBuf,
     mode: DumpMode,
+    prompt: Option<String>,
 }
 
 struct TrainingBatchSummary {
@@ -358,6 +362,7 @@ where
     let mut options = DumpRuntimeOptions {
         state_path: PathBuf::from(".brain/brain_state.bin"),
         mode: DumpMode::Summary,
+        prompt: None,
     };
 
     while let Some(arg) = args.next() {
@@ -374,6 +379,18 @@ where
             }
             "--edges" => {
                 options.mode = DumpMode::Edges;
+            }
+            "--contexts" => {
+                options.mode = DumpMode::Contexts;
+            }
+            "--memory" => {
+                options.mode = DumpMode::Memory;
+            }
+            "--distribution" => {
+                options.mode = DumpMode::Distribution;
+            }
+            "--prompt" => {
+                options.prompt = Some(next_value(&mut args, "--prompt")?);
             }
             value => return Err(format!("argumen dump tidak dikenali: {value}")),
         }
@@ -445,6 +462,30 @@ where
         "--memory-window" => {
             config.max_recent_utterances =
                 parse_usize(&next_value(args, "--memory-window")?, "--memory-window")?;
+            Ok(true)
+        }
+        "--temperature" => {
+            config.generation_config.temperature = parse_f32(&next_value(args, "--temperature")?, "--temperature")?;
+            Ok(true)
+        }
+        "--top-k" => {
+            config.generation_config.top_k = parse_usize(&next_value(args, "--top-k")?, "--top-k")?;
+            Ok(true)
+        }
+        "--top-p" => {
+            config.generation_config.top_p = parse_f32(&next_value(args, "--top-p")?, "--top-p")?;
+            Ok(true)
+        }
+        "--repetition-penalty" => {
+            config.generation_config.repetition_penalty = parse_f32(&next_value(args, "--repetition-penalty")?, "--repetition-penalty")?;
+            Ok(true)
+        }
+        "--min-confidence" => {
+            config.generation_config.min_confidence = parse_f32(&next_value(args, "--min-confidence")?, "--min-confidence")?;
+            Ok(true)
+        }
+        "--seed" => {
+            config.generation_config.randomness_seed = Some(parse_u64(&next_value(args, "--seed")?, "--seed")?);
             Ok(true)
         }
         _ => Ok(false),

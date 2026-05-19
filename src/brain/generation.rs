@@ -1,8 +1,14 @@
-use std::collections::BTreeSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use rayon::prelude::*;
 
+use super::config::GenerationConfig;
+use super::error::BrainError;
 use super::learning::{context_key, normalize_input, LearningReport};
-use super::state::{BrainEdge, BrainError, BrainState, EdgeKind, NodeKind};
-use super::tokenizer::{collapse_whitespace, token_priority, TokenLevel};
+use super::state::{BrainEdge, BrainState, EdgeKind, NodeKind, UtteranceMemory};
+use super::tokenizer::{collapse_whitespace, TokenLevel};
+use super::sampling::SimpleRng;
+use super::similarity::jaccard_similarity;
 
 #[derive(Clone, Debug)]
 pub struct InteractionReport {
@@ -10,100 +16,85 @@ pub struct InteractionReport {
     pub response: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct BrainEdgeSummary {
-    pub source_label: String,
-    pub target_label: String,
-    pub kind: EdgeKind,
-    pub strength: f32,
-    pub activation_count: u64,
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CandidateSource {
+    ContextPattern,
+    TransitionEdge,
+    RecentMemory,
+    SoftRecall,
+    ExactRecall,
+    Mixed,
 }
 
-#[derive(Clone, Debug)]
-pub struct BrainSummary {
-    pub interactions: u64,
-    pub learning_steps: u64,
-    pub training_examples: u64,
-    pub token_count: usize,
-    pub sensor_token_count: usize,
-    pub word_token_count: usize,
-    pub phrase_token_count: usize,
-    pub context_node_count: usize,
-    pub edge_count: usize,
-    pub remembered_utterances: usize,
-    pub latest_tokens: Vec<String>,
-    pub strongest_edges: Vec<BrainEdgeSummary>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TokenCandidate {
+    pub token_id: u64,
+    pub score: f32,
+    pub probability: f32,
+    pub occurrences: u64,
+    pub source: CandidateSource,
 }
 
-struct SimpleRng {
-    state: u64,
+#[derive(Default)]
+struct ComponentScores {
+    context_score: f32,
+    context_weight_sum: f32,
+    transition_score: f32,
+    recent_memory_score: f32,
+    soft_recall_score: f32,
+    sources: BTreeSet<CandidateSource>,
 }
 
-impl SimpleRng {
-    fn new() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        Self {
-            state: seed ^ 0x5555555555555555,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
-    }
-
-    fn next_f32(&mut self) -> f32 {
-        (self.next_u64() & 0xFFFFFFFF) as f32 / 4294967296.0
-    }
-}
-
-pub(crate) fn jaccard_similarity(a: &[u64], b: &[u64]) -> f32 {
-
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    let set_a: BTreeSet<u64> = a.iter().copied().collect();
-    let set_b: BTreeSet<u64> = b.iter().copied().collect();
-    let intersection = set_a.intersection(&set_b).count();
-    let union = set_a.union(&set_b).count();
-    if union == 0 {
-        0.0
-    } else {
-        intersection as f32 / union as f32
-    }
-}
 
 impl BrainState {
-    pub fn interact(&mut self, input: &str) -> Result<InteractionReport, BrainError> {
+    pub fn interact_with_seed(
+        &mut self,
+        input: &str,
+        seed: Option<u64>,
+        gen_config: &GenerationConfig,
+    ) -> Result<InteractionReport, BrainError> {
         let learning = self.learn_text(input)?;
         self.interaction_count += 1; // Live interaction
-        let response = if let Some(response) = self.recall_trained_response(&learning.normalized_text) {
+        let response = if let Some(response) = self.recall_trained_response_with_jaccard(&learning.token_ids, gen_config) {
             response
         } else {
-            self.generate_response_from_tokens(&learning.token_ids)?
+            self.generate_response_from_tokens_with_seed(&learning.token_ids, seed, gen_config)?
         };
         Ok(InteractionReport { learning, response })
     }
 
-    pub fn generate_response(&self, prompt: &str) -> Result<String, BrainError> {
-        let normalized_text = normalize_input(prompt)?;
-        if let Some(response) = self.recall_trained_response(&normalized_text) {
-            return Ok(response);
-        }
-        let token_ids = self.tokenizer.tokenize(&normalized_text);
-        self.generate_response_from_tokens(&token_ids)
+    pub fn interact(&mut self, input: &str) -> Result<InteractionReport, BrainError> {
+        let gen_config = self.config.generation_config;
+        self.interact_with_seed(input, None, &gen_config)
     }
 
-    pub fn generate_response_from_tokens(
+    pub fn generate_response_with_seed(
+        &self,
+        prompt: &str,
+        seed: Option<u64>,
+        gen_config: &GenerationConfig,
+    ) -> Result<String, BrainError> {
+        let normalized_text = normalize_input(prompt)?;
+        let token_ids = self.tokenizer.tokenize(&normalized_text);
+        if let Some(response) = self.recall_trained_response_with_jaccard(&token_ids, gen_config) {
+            return Ok(response);
+        }
+        self.generate_response_from_tokens_with_seed(&token_ids, seed, gen_config)
+    }
+
+    pub fn generate_response(&self, prompt: &str) -> Result<String, BrainError> {
+        self.generate_response_with_seed(prompt, None, &self.config.generation_config)
+    }
+
+    pub fn generate_response_from_tokens(&self, prompt_token_ids: &[u64]) -> Result<String, BrainError> {
+        self.generate_response_from_tokens_with_seed(prompt_token_ids, None, &self.config.generation_config)
+    }
+
+    pub fn generate_response_from_tokens_with_seed(
         &self,
         prompt_token_ids: &[u64],
+        seed: Option<u64>,
+        gen_config: &GenerationConfig,
     ) -> Result<String, BrainError> {
         if prompt_token_ids.is_empty() {
             return Ok("saya belum punya cukup pola untuk merespons.".to_string());
@@ -115,50 +106,23 @@ impl BrainState {
             context = prompt_token_ids.to_vec();
         }
         let mut seen = BTreeSet::new();
-        let mut rng = SimpleRng::new();
+        let mut rng = SimpleRng::new(seed);
 
         for _ in 0..self.config.response_token_limit {
-            let candidates = self.get_candidates(&context);
+            let candidates = self.next_token_distribution(&context, prompt_token_ids, &generated, gen_config);
             if candidates.is_empty() {
                 break;
             }
 
-            // Repetition penalty
-            let mut penalized_candidates: Vec<(u64, f32)> = candidates
-                .into_iter()
-                .map(|(token_id, weight)| {
-                    let occurrence = generated.iter().filter(|&&t| t == token_id).count();
-                    let penalty = 1.3f32.powi(occurrence as i32);
-                    (token_id, weight / penalty)
-                })
-                .collect();
-
-            // Sort by weight descending
-            penalized_candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-            // Top-k (k = 5)
-            let top_k = 5;
-            let top_candidates = if penalized_candidates.len() > top_k {
-                &penalized_candidates[..top_k]
-            } else {
-                &penalized_candidates[..]
-            };
-
-            let total_weight: f32 = top_candidates.iter().map(|(_, w)| w).sum();
-            if total_weight <= 0.0 {
+            // stop if top probability is lower than min_confidence
+            if candidates[0].probability < gen_config.min_confidence {
                 break;
             }
 
-            // Probabilistic sampling
-            let mut r = rng.next_f32() * total_weight;
-            let mut next_token = top_candidates[0].0;
-            for (token_id, weight) in top_candidates {
-                if r < *weight {
-                    next_token = *token_id;
-                    break;
-                }
-                r -= *weight;
-            }
+            let next_token = match self.sample_token(&candidates, &mut rng, gen_config) {
+                Some(tok) => tok,
+                None => break,
+            };
 
             let max_win = self.config.max_context_window;
             let current_window = &context[context.len().saturating_sub(max_win)..];
@@ -192,46 +156,283 @@ impl BrainState {
         }
     }
 
-    pub fn get_candidates(&self, context: &[u64]) -> Vec<(u64, f32)> {
+    pub fn next_token_distribution(
+        &self,
+        context: &[u64],
+        prompt: &[u64],
+        generated: &[u64],
+        gen_config: &GenerationConfig,
+    ) -> Vec<TokenCandidate> {
+        let prompt_tokens = prompt.to_vec();
+        let g_len = generated.len();
+
+        // 1. Soft recall in parallel
+        let memory_candidates: Vec<(&String, &BTreeMap<String, u64>)> = self.prompt_response_memory.iter().collect();
+        let soft_recall_results: Vec<(u64, f32)> = memory_candidates.par_iter().filter_map(|(key_prompt, responses)| {
+            let key_tokens = self.tokenizer.tokenize(key_prompt);
+            let sim = jaccard_similarity(&prompt_tokens, &key_tokens);
+            if sim >= 0.25 {
+                if let Some((response_text, _)) = responses.iter().max_by(|(left_r, left_c), (right_r, right_c)| {
+                    left_c.cmp(right_c).then_with(|| right_r.len().cmp(&left_r.len()))
+                }) {
+                    let response_tokens = self.tokenizer.tokenize(response_text);
+                    if g_len < response_tokens.len() {
+                        return Some((response_tokens[g_len], sim));
+                    }
+                }
+            }
+            None
+        }).collect();
+
+        // 2. Recent memory in parallel
+        let utterances: Vec<&UtteranceMemory> = self.recent_utterances.iter().collect();
+        let recent_memory_results: Vec<(u64, f32)> = utterances.par_iter().enumerate().flat_map(|(idx, utterance)| {
+            let mut local = Vec::new();
+            let n = utterances.len();
+            let recency_weight = (idx + 1) as f32 / n as f32;
+            if let Some(&last_token) = context.last() {
+                for i in 0..utterance.token_ids.len() {
+                    if utterance.token_ids[i] == last_token && i + 1 < utterance.token_ids.len() {
+                        local.push((utterance.token_ids[i + 1], recency_weight));
+                    }
+                }
+            }
+            for &t in &utterance.token_ids {
+                local.push((t, 0.05 * recency_weight));
+            }
+            local
+        }).collect();
+
+        // 3. Context pattern in parallel
         let max_window = self.config.max_context_window.min(context.len());
-        // 1. Try matching context patterns
-        for window_size in (1..=max_window).rev() {
-            let prefix = &context[context.len() - window_size..];
+        let windows: Vec<Vec<u64>> = (1..=max_window)
+            .map(|w| context[context.len() - w..].to_vec())
+            .collect();
+        let context_results: Vec<(u64, f32, f32)> = windows.par_iter().enumerate().flat_map(|(index, prefix)| {
+            let w = (index + 1) as f32;
+            let mut local = Vec::new();
             if let Some(pattern) = self.context_patterns.get(&context_key(prefix)) {
                 let total_predictions: u64 = pattern.predicted_counts.values().sum();
                 if total_predictions > 0 {
-                    return pattern
-                        .predicted_counts
-                        .iter()
-                        .map(|(&token_id, &count)| {
-                            let priority = token_priority(
-                                self.tokenizer
-                                    .get(token_id)
-                                    .map(|token| token.level)
-                                    .unwrap_or(TokenLevel::Sensor),
-                            );
-                            let weight = (count as f32 / total_predictions as f32) + (priority as f32 * 0.05);
-                            (token_id, weight)
-                        })
-                        .collect();
+                    for (&token_id, &count) in &pattern.predicted_counts {
+                        let score = (count as f32 / total_predictions as f32) * w;
+                        local.push((token_id, score, w));
+                    }
                 }
+            }
+            local
+        }).collect();
+
+        // 4. Transitions in parallel
+        let edge_candidates: Vec<&BrainEdge> = self.edges.values().collect();
+        let last_token = context.last().copied();
+        let transition_results: Vec<(u64, f32)> = if let Some(last_tok) = last_token {
+            edge_candidates.par_iter().filter_map(|edge| {
+                if edge.kind == EdgeKind::Transition && edge.source == last_tok {
+                    Some((edge.target, edge.strength.clamp(0.0, 1.0)))
+                } else {
+                    None
+                }
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
+        // Combine scores
+        let mut candidate_map: BTreeMap<u64, ComponentScores> = BTreeMap::new();
+
+        for (token_id, score, w) in context_results {
+            let entry = candidate_map.entry(token_id).or_default();
+            entry.context_score += score;
+            entry.context_weight_sum += w;
+            entry.sources.insert(CandidateSource::ContextPattern);
+        }
+
+        let sum_transition: f32 = transition_results.iter().map(|(_, s)| s).sum();
+        for (token_id, strength) in transition_results {
+            let entry = candidate_map.entry(token_id).or_default();
+            entry.transition_score += if sum_transition > 0.0 { strength / sum_transition } else { 0.0 };
+            entry.sources.insert(CandidateSource::TransitionEdge);
+        }
+
+        let sum_recent: f32 = recent_memory_results.iter().map(|(_, s)| s).sum();
+        for (token_id, weight) in recent_memory_results {
+            let entry = candidate_map.entry(token_id).or_default();
+            entry.recent_memory_score += if sum_recent > 0.0 { weight / sum_recent } else { 0.0 };
+            entry.sources.insert(CandidateSource::RecentMemory);
+        }
+
+        let sum_soft: f32 = soft_recall_results.iter().map(|(_, s)| s).sum();
+        for (token_id, sim) in soft_recall_results {
+            let entry = candidate_map.entry(token_id).or_default();
+            entry.soft_recall_score += if sum_soft > 0.0 { sim / sum_soft } else { 0.0 };
+            entry.sources.insert(CandidateSource::SoftRecall);
+        }
+
+        let mut list = Vec::new();
+        for (token_id, entry) in candidate_map {
+            let ctx_score = if entry.context_weight_sum > 0.0 {
+                entry.context_score / entry.context_weight_sum
+            } else {
+                0.0
+            };
+
+            let score = ctx_score * gen_config.context_weight
+                + entry.transition_score * gen_config.transition_weight
+                + entry.recent_memory_score * gen_config.recent_memory_weight
+                + entry.soft_recall_score * gen_config.soft_recall_weight;
+
+            if score < gen_config.min_confidence {
+                continue;
+            }
+
+            // Apply repetition penalty
+            let occurrence = generated.iter().filter(|&&t| t == token_id).count();
+            let penalized_score = if occurrence > 0 {
+                score / gen_config.repetition_penalty.powi(occurrence as i32)
+            } else {
+                score
+            };
+
+            let source = if entry.sources.len() > 1 {
+                CandidateSource::Mixed
+            } else {
+                entry.sources.into_iter().next().unwrap_or(CandidateSource::Mixed)
+            };
+
+            let occurrences = self.nodes.get(&token_id).map(|n| n.activation_count).unwrap_or(0);
+            list.push(TokenCandidate {
+                token_id,
+                score: penalized_score,
+                probability: 0.0,
+                occurrences,
+                source,
+            });
+        }
+
+        // Apply softmax or temperature scaling
+        if list.is_empty() {
+            return list;
+        }
+
+        if gen_config.temperature <= 0.01 {
+            // Greedy
+            list.sort_by(|a, b| b.score.total_cmp(&a.score));
+            list[0].probability = 1.0;
+            list.truncate(1);
+        } else {
+            // Normal softmax with temperature
+            let mut sum_exp = 0.0f32;
+            let mut exps = Vec::with_capacity(list.len());
+            for c in &list {
+                let exp = (c.score / gen_config.temperature).exp();
+                exps.push(exp);
+                sum_exp += exp;
+            }
+            if sum_exp > 0.0 {
+                for (c, exp) in list.iter_mut().zip(exps) {
+                    c.probability = exp / sum_exp;
+                }
+            } else {
+                let size = list.len() as f32;
+                for c in &mut list {
+                    c.probability = 1.0 / size;
+                }
+            }
+            // Sort by probability descending
+            list.sort_by(|a, b| b.probability.total_cmp(&a.probability));
+        }
+
+        list
+    }
+
+    pub fn sample_token(
+        &self,
+        candidates: &[TokenCandidate],
+        rng: &mut SimpleRng,
+        gen_config: &GenerationConfig,
+    ) -> Option<u64> {
+        if candidates.is_empty() {
+            return None;
+        }
+
+        // Top-k filtering
+        let k = gen_config.top_k.max(1);
+        let mut top_k_candidates = candidates.to_vec();
+        if top_k_candidates.len() > k {
+            top_k_candidates.truncate(k);
+        }
+
+        // Re-normalize probabilities
+        let total_p: f32 = top_k_candidates.iter().map(|c| c.probability).sum();
+        if total_p <= 0.0 {
+            return Some(top_k_candidates[0].token_id);
+        }
+        for c in &mut top_k_candidates {
+            c.probability /= total_p;
+        }
+
+        // Top-p (nucleus) filtering
+        let mut cumulative_p = 0.0;
+        let mut top_p_candidates = Vec::new();
+        for c in top_k_candidates {
+            cumulative_p += c.probability;
+            top_p_candidates.push(c);
+            if cumulative_p >= gen_config.top_p {
+                break;
             }
         }
 
-        // 2. Fallback to transition edges
-        if let Some(&last_token) = context.last() {
-            let mut transition_candidates = Vec::new();
-            for edge in self.edges.values() {
-                if edge.kind == EdgeKind::Transition && edge.source == last_token {
-                    transition_candidates.push((edge.target, edge.strength.clamp(0.0, 1.0)));
-                }
-            }
-            if !transition_candidates.is_empty() {
-                return transition_candidates;
-            }
+        // Re-normalize top-p probabilities
+        let total_p: f32 = top_p_candidates.iter().map(|c| c.probability).sum();
+        if total_p <= 0.0 {
+            return Some(top_p_candidates[0].token_id);
+        }
+        for c in &mut top_p_candidates {
+            c.probability /= total_p;
         }
 
-        Vec::new()
+        // Probabilistic sampling
+        let mut r = rng.next_f32() * total_p;
+        for c in &top_p_candidates {
+            if r < c.probability {
+                return Some(c.token_id);
+            }
+            r -= c.probability;
+        }
+
+        Some(top_p_candidates[0].token_id)
+    }
+
+    pub fn recall_trained_response_with_jaccard(
+        &self,
+        prompt_tokens: &[u64],
+        _gen_config: &GenerationConfig,
+    ) -> Option<String> {
+        // If we want exact recall, we can find if there is any prompt in memory whose tokenization matches exactly.
+        let mut best_exact: Option<(String, u64)> = None;
+        for (mem_prompt, responses) in &self.prompt_response_memory {
+            let mem_tokens = self.tokenizer.tokenize(mem_prompt);
+            if mem_tokens == prompt_tokens {
+                if let Some((response, count)) = responses.iter().max_by(
+                    |(left_response, left_count), (right_response, right_count)| {
+                        left_count
+                            .cmp(right_count)
+                            .then_with(|| right_response.len().cmp(&left_response.len()))
+                    },
+                ) {
+                    if best_exact.as_ref().map_or(true, |(_, c)| *count > *c) {
+                        best_exact = Some((response.clone(), *count));
+                    }
+                }
+            }
+        }
+        best_exact.map(|(r, _)| r)
+    }
+
+    pub fn recall_trained_response(&self, prompt: &str) -> Option<String> {
+        let token_ids = self.tokenizer.tokenize(prompt);
+        self.recall_trained_response_with_jaccard(&token_ids, &self.config.generation_config)
     }
 
     pub fn expand_context_tokens(&self, token_ids: &[u64]) -> Vec<u64> {
@@ -248,12 +449,15 @@ impl BrainState {
             return;
         }
 
-        let Some(node) = self.nodes.get(&token_id) else {
-            output.push(token_id);
-            return;
+        let node = match self.nodes.get(&token_id) {
+            Some(n) => n,
+            None => {
+                output.push(token_id);
+                return;
+            }
         };
 
-        if node.composition.is_empty() {
+        if node.kind != NodeKind::Phrase {
             output.push(token_id);
             return;
         }
@@ -277,123 +481,5 @@ impl BrainState {
             .get(&node_id)
             .map(|node| node.label.clone())
             .unwrap_or_else(|| format!("node#{node_id}"))
-    }
-
-    pub fn recall_trained_response(&self, prompt: &str) -> Option<String> {
-        // 1. Exact recall
-        if let Some(responses) = self.prompt_response_memory.get(prompt) {
-            if let Some((response, _)) = responses.iter().max_by(
-                |(left_response, left_count), (right_response, right_count)| {
-                    left_count
-                        .cmp(right_count)
-                        .then_with(|| right_response.len().cmp(&left_response.len()))
-                },
-            ) {
-                return Some(response.clone());
-            }
-        }
-
-        // 2. Approximate recall using Jaccard Similarity on tokenized representations
-        let input_tokens = self.tokenizer.tokenize(prompt);
-        if input_tokens.is_empty() {
-            return None;
-        }
-
-        let mut best_key = None;
-        let mut best_similarity = 0.0f32;
-
-        for key in self.prompt_response_memory.keys() {
-            let key_tokens = self.tokenizer.tokenize(key);
-            let similarity = jaccard_similarity(&input_tokens, &key_tokens);
-            if similarity > best_similarity {
-                best_similarity = similarity;
-                best_key = Some(key);
-            }
-        }
-
-        if best_similarity >= 0.55 {
-            if let Some(key) = best_key {
-                let responses = self.prompt_response_memory.get(key)?;
-                if let Some((response, _)) = responses.iter().max_by(
-                    |(left_response, left_count), (right_response, right_count)| {
-                        left_count
-                            .cmp(right_count)
-                            .then_with(|| right_response.len().cmp(&left_response.len()))
-                    },
-                ) {
-                    return Some(response.clone());
-                }
-            }
-        }
-
-        None
-    }
-
-    pub fn summary(&self, strongest_edge_limit: usize) -> BrainSummary {
-        let mut strongest_edges: Vec<&BrainEdge> = self.edges.values().collect();
-        strongest_edges.sort_by(|left, right| {
-            right
-                .strength
-                .total_cmp(&left.strength)
-                .then_with(|| right.activation_count.cmp(&left.activation_count))
-        });
-
-        let strongest_edges = strongest_edges
-            .into_iter()
-            .take(strongest_edge_limit)
-            .map(|edge| BrainEdgeSummary {
-                source_label: self.node_label(edge.source),
-                target_label: self.node_label(edge.target),
-                kind: edge.kind,
-                strength: edge.strength,
-                activation_count: edge.activation_count,
-            })
-            .collect();
-
-        let mut latest_tokens: Vec<&super::tokenizer::TokenEntry> = self.tokenizer.entries.values().collect();
-        latest_tokens.sort_by(|left, right| {
-            right
-                .created_at
-                .cmp(&left.created_at)
-                .then_with(|| right.node_id.cmp(&left.node_id))
-        });
-
-        BrainSummary {
-            interactions: self.interaction_count,
-            learning_steps: self.learning_step_count,
-            training_examples: self.training_example_count,
-            token_count: self.tokenizer.entries.len(),
-            sensor_token_count: self
-                .tokenizer
-                .entries
-                .values()
-                .filter(|token| token.level == TokenLevel::Sensor)
-                .count(),
-            word_token_count: self
-                .tokenizer
-                .entries
-                .values()
-                .filter(|token| token.level == TokenLevel::Word)
-                .count(),
-            phrase_token_count: self
-                .tokenizer
-                .entries
-                .values()
-                .filter(|token| token.level == TokenLevel::Phrase)
-                .count(),
-            context_node_count: self
-                .nodes
-                .values()
-                .filter(|node| node.kind == NodeKind::Context)
-                .count(),
-            edge_count: self.edges.len(),
-            remembered_utterances: self.recent_utterances.len(),
-            latest_tokens: latest_tokens
-                .into_iter()
-                .take(8)
-                .map(|token| token.text.clone())
-                .collect(),
-            strongest_edges,
-        }
     }
 }
