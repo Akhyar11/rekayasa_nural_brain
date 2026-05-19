@@ -22,6 +22,7 @@ enum Command {
     Chat(ChatRuntimeOptions),
     Train(TrainRuntimeOptions),
     Inspect(InspectRuntimeOptions),
+    Dump(DumpRuntimeOptions),
 }
 
 struct SimulationRuntimeOptions {
@@ -35,6 +36,7 @@ struct ChatRuntimeOptions {
     state_path: PathBuf,
     prompt: Option<String>,
     config: BrainConfig,
+    learn: bool,
 }
 
 struct TrainRuntimeOptions {
@@ -49,6 +51,18 @@ struct TrainRuntimeOptions {
 
 struct InspectRuntimeOptions {
     state_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DumpMode {
+    Summary,
+    Tokens,
+    Edges,
+}
+
+struct DumpRuntimeOptions {
+    state_path: PathBuf,
+    mode: DumpMode,
 }
 
 struct TrainingBatchSummary {
@@ -68,6 +82,8 @@ struct TrainingBatchSummary {
 
 struct TrainStateSnapshot {
     interactions: u64,
+    learning_steps: u64,
+    training_examples: u64,
     token_count: usize,
     sensor_token_count: usize,
     word_token_count: usize,
@@ -136,6 +152,7 @@ fn main() -> ExitCode {
         Command::Chat(options) => run_chat(options),
         Command::Train(options) => run_train(options),
         Command::Inspect(options) => run_inspect(options),
+        Command::Dump(options) => run_dump(options),
     }
 }
 
@@ -155,6 +172,7 @@ where
         "chat" => parse_chat_options(args).map(Command::Chat),
         "train" => parse_train_options(args).map(Command::Train),
         "inspect" => parse_inspect_options(args).map(Command::Inspect),
+        "dump" => parse_dump_options(args).map(Command::Dump),
         other => Err(format!("subcommand tidak dikenali: {other}")),
     }
 }
@@ -237,6 +255,7 @@ where
         state_path: PathBuf::from(".brain/brain_state.bin"),
         prompt: None,
         config: BrainConfig::default(),
+        learn: true,
     };
 
     while let Some(arg) = args.next() {
@@ -247,6 +266,9 @@ where
             }
             "--prompt" => {
                 options.prompt = Some(next_value(&mut args, "--prompt")?);
+            }
+            "--no-learn" => {
+                options.learn = false;
             }
             _ => {
                 if !apply_brain_config_arg(&mut options.config, &arg, &mut args)? {
@@ -322,6 +344,38 @@ where
                 options.state_path = PathBuf::from(next_value(&mut args, "--state")?);
             }
             value => return Err(format!("argumen inspect tidak dikenali: {value}")),
+        }
+    }
+
+    Ok(options)
+}
+
+fn parse_dump_options<I>(args: I) -> Result<DumpRuntimeOptions, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let mut options = DumpRuntimeOptions {
+        state_path: PathBuf::from(".brain/brain_state.bin"),
+        mode: DumpMode::Summary,
+    };
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Err(dump_help_text().to_string()),
+            "--state" => {
+                options.state_path = PathBuf::from(next_value(&mut args, "--state")?);
+            }
+            "--summary" => {
+                options.mode = DumpMode::Summary;
+            }
+            "--tokens" => {
+                options.mode = DumpMode::Tokens;
+            }
+            "--edges" => {
+                options.mode = DumpMode::Edges;
+            }
+            value => return Err(format!("argumen dump tidak dikenali: {value}")),
         }
     }
 
@@ -433,18 +487,33 @@ fn run_chat(options: ChatRuntimeOptions) -> ExitCode {
     };
 
     if let Some(prompt) = options.prompt {
-        match brain.interact(&prompt) {
-            Ok(report) => {
-                print_interaction_report(&report);
-                if let Err(error) = brain.save_to_path(&options.state_path) {
-                    eprintln!("Gagal menyimpan brain state: {error}");
+        if options.learn {
+            match brain.interact(&prompt) {
+                Ok(report) => {
+                    print_interaction_report(&report);
+                    if let Err(error) = brain.save_to_path(&options.state_path) {
+                        eprintln!("Gagal menyimpan brain state: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                    return ExitCode::SUCCESS;
+                }
+                Err(error) => {
+                    eprintln!("Interaksi gagal: {error}");
                     return ExitCode::FAILURE;
                 }
-                return ExitCode::SUCCESS;
             }
-            Err(error) => {
-                eprintln!("Interaksi gagal: {error}");
-                return ExitCode::FAILURE;
+        } else {
+            let mut temp_brain = brain.clone();
+            temp_brain.recent_utterances.clear();
+            match temp_brain.generate_response(&prompt) {
+                Ok(response) => {
+                    println!("brain> {response}");
+                    return ExitCode::SUCCESS;
+                }
+                Err(error) => {
+                    eprintln!("Generasi respons gagal: {error}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
@@ -491,16 +560,27 @@ fn run_chat(options: ChatRuntimeOptions) -> ExitCode {
             "/stats" => {
                 print_brain_summary(&brain.summary(8));
             }
-            _ => match brain.interact(input) {
-                Ok(report) => {
-                    print_interaction_report(&report);
-                    if let Err(error) = brain.save_to_path(&options.state_path) {
-                        eprintln!("Gagal menyimpan brain state: {error}");
-                        return ExitCode::FAILURE;
+            _ => {
+                if options.learn {
+                    match brain.interact(input) {
+                        Ok(report) => {
+                            print_interaction_report(&report);
+                            if let Err(error) = brain.save_to_path(&options.state_path) {
+                                eprintln!("Gagal menyimpan brain state: {error}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Interaksi gagal: {error}");
+                        }
                     }
-                }
-                Err(error) => {
-                    eprintln!("Interaksi gagal: {error}");
+                } else {
+                    let mut temp_brain = brain.clone();
+                    temp_brain.recent_utterances.clear();
+                    match temp_brain.generate_response(input) {
+                        Ok(response) => println!("brain> {response}"),
+                        Err(error) => eprintln!("Generasi respons gagal: {error}"),
+                    }
                 }
             },
         }
@@ -635,6 +715,46 @@ fn run_inspect(options: InspectRuntimeOptions) -> ExitCode {
     };
 
     print_brain_summary(&brain.summary(12));
+    ExitCode::SUCCESS
+}
+
+fn run_dump(options: DumpRuntimeOptions) -> ExitCode {
+    let brain = match BrainState::load_from_path(&options.state_path) {
+        Ok(brain) => brain,
+        Err(error) => {
+            eprintln!(
+                "Gagal membaca brain state {}: {error}",
+                options.state_path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match options.mode {
+        DumpMode::Summary => {
+            print_brain_summary(&brain.summary(20));
+        }
+        DumpMode::Tokens => {
+            println!("=== TOKENS DUMP (total: {}) ===", brain.tokenizer.entries.len());
+            for (token_id, entry) in &brain.tokenizer.entries {
+                println!(
+                    "#{:<5} | {:<8?} | Occ: {:<5} | {:?}",
+                    token_id, entry.level, entry.occurrence_count, entry.text
+                );
+            }
+        }
+        DumpMode::Edges => {
+            println!("=== EDGES DUMP (total: {}) ===", brain.edges.len());
+            for edge in brain.edges.values() {
+                let src_lbl = brain.node_label(edge.source);
+                let tgt_lbl = brain.node_label(edge.target);
+                println!(
+                    "{:<25} -> {:<25} | Kind: {:<18?} | Strength: {:.4} | Occ: {}",
+                    src_lbl, tgt_lbl, edge.kind, edge.strength, edge.activation_count
+                );
+            }
+        }
+    }
     ExitCode::SUCCESS
 }
 
@@ -879,6 +999,24 @@ fn print_training_summary(
             .saturating_sub(run_report.initial_state.interactions)
     );
     println!(
+        "learning steps      : {} -> {} (+{})",
+        run_report.initial_state.learning_steps,
+        run_report.final_state.learning_steps,
+        run_report
+            .final_state
+            .learning_steps
+            .saturating_sub(run_report.initial_state.learning_steps)
+    );
+    println!(
+        "training examples   : {} -> {} (+{})",
+        run_report.initial_state.training_examples,
+        run_report.final_state.training_examples,
+        run_report
+            .final_state
+            .training_examples
+            .saturating_sub(run_report.initial_state.training_examples)
+    );
+    println!(
         "tokens total        : {} -> {} (+{})",
         run_report.initial_state.token_count,
         run_report.final_state.token_count,
@@ -1120,6 +1258,8 @@ fn capture_train_state(brain: &BrainState) -> TrainStateSnapshot {
 
     TrainStateSnapshot {
         interactions: brain.interaction_count,
+        learning_steps: brain.learning_step_count,
+        training_examples: brain.training_example_count,
         token_count: brain.tokenizer.entries.len(),
         sensor_token_count,
         word_token_count,
@@ -1176,6 +1316,8 @@ fn yes_no(value: bool) -> &'static str {
 fn print_brain_summary(summary: &BrainSummary) {
     println!("Brain summary");
     println!("interactions        : {}", summary.interactions);
+    println!("learning steps      : {}", summary.learning_steps);
+    println!("training examples   : {}", summary.training_examples);
     println!("tokens total        : {}", summary.token_count);
     println!("sensor tokens       : {}", summary.sensor_token_count);
     println!("word tokens         : {}", summary.word_token_count);
@@ -1357,6 +1499,7 @@ Commands:
   chat        Jalankan dynamic persistent brain yang belajar dari interaksi
   train       Latih brain dari file pasangan prompt-response
   inspect     Lihat ringkasan state brain yang tersimpan
+  dump        Dump vocabulary, edges, atau summary dalam format terperinci
   simulate    Jalankan simulator PSCM fixed-size lama
   help        Tampilkan bantuan
   version     Tampilkan versi
@@ -1367,6 +1510,9 @@ Examples:
   cargo run -- chat
   cargo run -- chat --prompt \"saya suka kopi\"
   cargo run -- inspect
+  cargo run -- dump --summary
+  cargo run -- dump --tokens
+  cargo run -- dump --edges
   cargo run -- simulate --input \"spiking brain\"
 "
 }
@@ -1443,6 +1589,19 @@ Usage:
 
 Options:
   --state <path>                  Lokasi file state brain
+"
+}
+
+fn dump_help_text() -> &'static str {
+    "\
+Usage:
+  cargo run -- dump [options]
+
+Options:
+  --state <path>                  Lokasi file state brain
+  --summary                       Dump ringkasan state brain (default)
+  --tokens                        Dump seluruh daftar token vocabulary terperinci
+  --edges                         Dump seluruh edge network graph terperinci
 "
 }
 
