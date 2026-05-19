@@ -795,6 +795,57 @@ fn run_dump(options: DumpRuntimeOptions) -> ExitCode {
                 );
             }
         }
+        DumpMode::Contexts => {
+            println!("=== CONTEXTS DUMP (total: {}) ===", brain.context_patterns.len());
+            for pattern in brain.context_patterns.values() {
+                println!(
+                    "Pattern: {:<35} | Occ: {:<5} | Node ID: {:?}",
+                    pattern.label, pattern.occurrence_count, pattern.node_id
+                );
+                for (pred_tok, count) in &pattern.predicted_counts {
+                    let pred_lbl = brain.node_label(*pred_tok);
+                    println!("  -> predicting {:<25} | count: {}", pred_lbl, count);
+                }
+            }
+        }
+        DumpMode::Memory => {
+            println!("=== MEMORY DUMP ===");
+            println!("--- Prompt Response Memory (total keys: {}) ---", brain.prompt_response_memory.len());
+            for (prompt, responses) in &brain.prompt_response_memory {
+                println!("Prompt: {:?}", prompt);
+                for (response, count) in responses {
+                    println!("  -> Response: {:<40} | count: {}", response, count);
+                }
+            }
+            println!("\n--- Recent Utterances (total: {}) ---", brain.recent_utterances.len());
+            for utterance in &brain.recent_utterances {
+                println!(
+                    "  [{}] {:?}",
+                    utterance.interaction_index, utterance.text
+                );
+            }
+        }
+        DumpMode::Distribution => {
+            let prompt_text = options.prompt.clone().or_else(|| {
+                brain.recent_utterances.back().map(|u| u.text.clone())
+            });
+            if let Some(text) = prompt_text {
+                println!("=== DISTRIBUTION DUMP FOR PROMPT: {:?} ===", text);
+                let normalized = rekayasa_nural_brain::brain::learning::normalize_input(&text).unwrap_or_default();
+                let token_ids = brain.tokenizer.tokenize(&normalized);
+                let distribution = brain.next_token_distribution(&token_ids, &[], &[], &brain.config.generation_config);
+                println!("Candidates (total: {}):", distribution.len());
+                for candidate in distribution {
+                    let lbl = brain.node_label(candidate.token_id);
+                    println!(
+                        "  Token: {:<20} (ID: #{}) | Prob: {:.4} | Score: {:.4} | Source: {:?}",
+                        lbl, candidate.token_id, candidate.probability, candidate.score, candidate.source
+                    );
+                }
+            } else {
+                println!("Gunakan --prompt <teks> untuk menampilkan distribusi probabilitas token.");
+            }
+        }
     }
     ExitCode::SUCCESS
 }
@@ -1643,6 +1694,10 @@ Options:
   --summary                       Dump ringkasan state brain (default)
   --tokens                        Dump seluruh daftar token vocabulary terperinci
   --edges                         Dump seluruh edge network graph terperinci
+  --contexts                      Dump seluruh context patterns beserta prediksi
+  --memory                        Dump recent memory dan prompt-response memory
+  --distribution                  Dump distribusi probabilitas token berikutnya
+  --prompt <teks>                 Prompt kustom untuk dump --distribution
 "
 }
 
