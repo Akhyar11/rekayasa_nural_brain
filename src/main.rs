@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -8,14 +9,16 @@ use std::time::Duration;
 use rekayasa_nural_brain::{
     ActiveTickSnapshot, BrainConfig, BrainEdgeSummary, BrainState, BrainSummary, ConnectionSummary,
     InteractionReport, SimulationConfig, SimulationError, SimulationReport, SpikingTokenizer,
-    run_simulation, run_simulation_with_observer,
+    TrainingExampleReport, run_simulation, run_simulation_with_observer,
 };
+use serde::Deserialize;
 
 enum Command {
     Help,
     Version,
     Simulate(SimulationRuntimeOptions),
     Chat(ChatRuntimeOptions),
+    Train(TrainRuntimeOptions),
     Inspect(InspectRuntimeOptions),
 }
 
@@ -32,8 +35,42 @@ struct ChatRuntimeOptions {
     config: BrainConfig,
 }
 
+struct TrainRuntimeOptions {
+    state_path: PathBuf,
+    file_path: PathBuf,
+    limit: Option<usize>,
+    config: BrainConfig,
+}
+
 struct InspectRuntimeOptions {
     state_path: PathBuf,
+}
+
+struct TrainingBatchSummary {
+    examples: usize,
+    new_sensor_tokens: usize,
+    new_word_tokens: usize,
+    new_phrase_tokens: usize,
+    new_context_nodes: usize,
+    new_edges: usize,
+    pruned_edges: usize,
+    pruned_context_nodes: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonaChatDataset {
+    train: Vec<PersonaChatDialogue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonaChatDialogue {
+    utterances: Vec<PersonaChatUtterance>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonaChatUtterance {
+    candidates: Vec<String>,
+    history: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -57,6 +94,7 @@ fn main() -> ExitCode {
         }
         Command::Simulate(options) => run_simulate(options),
         Command::Chat(options) => run_chat(options),
+        Command::Train(options) => run_train(options),
         Command::Inspect(options) => run_inspect(options),
     }
 }
@@ -75,6 +113,7 @@ where
         "--version" | "-V" | "version" => Ok(Command::Version),
         "simulate" => parse_simulation_options(args).map(Command::Simulate),
         "chat" => parse_chat_options(args).map(Command::Chat),
+        "train" => parse_train_options(args).map(Command::Train),
         "inspect" => parse_inspect_options(args).map(Command::Inspect),
         other => Err(format!("subcommand tidak dikenali: {other}")),
     }
@@ -169,63 +208,46 @@ where
             "--prompt" => {
                 options.prompt = Some(next_value(&mut args, "--prompt")?);
             }
-            "--word-threshold" => {
-                options.config.word_promotion_threshold = parse_u64(
-                    &next_value(&mut args, "--word-threshold")?,
-                    "--word-threshold",
-                )?;
+            _ => {
+                if !apply_brain_config_arg(&mut options.config, &arg, &mut args)? {
+                    return Err(format!("argumen chat tidak dikenali: {arg}"));
+                }
             }
-            "--phrase-threshold" => {
-                options.config.phrase_promotion_threshold = parse_u64(
-                    &next_value(&mut args, "--phrase-threshold")?,
-                    "--phrase-threshold",
-                )?;
+        }
+    }
+
+    Ok(options)
+}
+
+fn parse_train_options<I>(args: I) -> Result<TrainRuntimeOptions, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let mut options = TrainRuntimeOptions {
+        state_path: PathBuf::from(".brain/brain_state.bin"),
+        file_path: PathBuf::from("training/id_personachat/id_personachat.json"),
+        limit: None,
+        config: BrainConfig::default(),
+    };
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Err(train_help_text().to_string()),
+            "--state" => {
+                options.state_path = PathBuf::from(next_value(&mut args, "--state")?);
             }
-            "--context-threshold" => {
-                options.config.context_promotion_threshold = parse_u64(
-                    &next_value(&mut args, "--context-threshold")?,
-                    "--context-threshold",
-                )?;
+            "--file" => {
+                options.file_path = PathBuf::from(next_value(&mut args, "--file")?);
             }
-            "--max-ngram" => {
-                options.config.max_ngram =
-                    parse_usize(&next_value(&mut args, "--max-ngram")?, "--max-ngram")?;
+            "--limit" => {
+                options.limit = Some(parse_usize(&next_value(&mut args, "--limit")?, "--limit")?);
             }
-            "--context-window" => {
-                options.config.max_context_window = parse_usize(
-                    &next_value(&mut args, "--context-window")?,
-                    "--context-window",
-                )?;
+            _ => {
+                if !apply_brain_config_arg(&mut options.config, &arg, &mut args)? {
+                    return Err(format!("argumen train tidak dikenali: {arg}"));
+                }
             }
-            "--prune-interval" => {
-                options.config.prune_interval = parse_u64(
-                    &next_value(&mut args, "--prune-interval")?,
-                    "--prune-interval",
-                )?;
-            }
-            "--edge-decay" => {
-                options.config.edge_decay =
-                    parse_f32(&next_value(&mut args, "--edge-decay")?, "--edge-decay")?;
-            }
-            "--min-edge-strength" => {
-                options.config.min_edge_strength = parse_f32(
-                    &next_value(&mut args, "--min-edge-strength")?,
-                    "--min-edge-strength",
-                )?;
-            }
-            "--response-token-limit" => {
-                options.config.response_token_limit = parse_usize(
-                    &next_value(&mut args, "--response-token-limit")?,
-                    "--response-token-limit",
-                )?;
-            }
-            "--memory-window" => {
-                options.config.max_recent_utterances = parse_usize(
-                    &next_value(&mut args, "--memory-window")?,
-                    "--memory-window",
-                )?;
-            }
-            value => return Err(format!("argumen chat tidak dikenali: {value}")),
         }
     }
 
@@ -252,6 +274,75 @@ where
     }
 
     Ok(options)
+}
+
+fn apply_brain_config_arg<I>(
+    config: &mut BrainConfig,
+    arg: &str,
+    args: &mut I,
+) -> Result<bool, String>
+where
+    I: Iterator<Item = String>,
+{
+    match arg {
+        "--word-threshold" => {
+            config.word_promotion_threshold =
+                parse_u64(&next_value(args, "--word-threshold")?, "--word-threshold")?;
+            Ok(true)
+        }
+        "--phrase-threshold" => {
+            config.phrase_promotion_threshold = parse_u64(
+                &next_value(args, "--phrase-threshold")?,
+                "--phrase-threshold",
+            )?;
+            Ok(true)
+        }
+        "--context-threshold" => {
+            config.context_promotion_threshold = parse_u64(
+                &next_value(args, "--context-threshold")?,
+                "--context-threshold",
+            )?;
+            Ok(true)
+        }
+        "--max-ngram" => {
+            config.max_ngram = parse_usize(&next_value(args, "--max-ngram")?, "--max-ngram")?;
+            Ok(true)
+        }
+        "--context-window" => {
+            config.max_context_window =
+                parse_usize(&next_value(args, "--context-window")?, "--context-window")?;
+            Ok(true)
+        }
+        "--prune-interval" => {
+            config.prune_interval =
+                parse_u64(&next_value(args, "--prune-interval")?, "--prune-interval")?;
+            Ok(true)
+        }
+        "--edge-decay" => {
+            config.edge_decay = parse_f32(&next_value(args, "--edge-decay")?, "--edge-decay")?;
+            Ok(true)
+        }
+        "--min-edge-strength" => {
+            config.min_edge_strength = parse_f32(
+                &next_value(args, "--min-edge-strength")?,
+                "--min-edge-strength",
+            )?;
+            Ok(true)
+        }
+        "--response-token-limit" => {
+            config.response_token_limit = parse_usize(
+                &next_value(args, "--response-token-limit")?,
+                "--response-token-limit",
+            )?;
+            Ok(true)
+        }
+        "--memory-window" => {
+            config.max_recent_utterances =
+                parse_usize(&next_value(args, "--memory-window")?, "--memory-window")?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn run_simulate(options: SimulationRuntimeOptions) -> ExitCode {
@@ -368,6 +459,71 @@ fn run_chat(options: ChatRuntimeOptions) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    ExitCode::SUCCESS
+}
+
+fn run_train(options: TrainRuntimeOptions) -> ExitCode {
+    let mut brain = match BrainState::load_or_new(&options.state_path, options.config) {
+        Ok(brain) => brain,
+        Err(error) => {
+            eprintln!("Gagal memuat brain state: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut examples = match load_training_examples(&options.file_path) {
+        Ok(examples) => examples,
+        Err(error) => {
+            eprintln!(
+                "Gagal membaca training file {}: {error}",
+                options.file_path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if examples.is_empty() {
+        eprintln!(
+            "Training file {} tidak berisi pasangan prompt-response.",
+            options.file_path.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    if let Some(limit) = options.limit
+        && examples.len() > limit
+    {
+        examples.truncate(limit);
+    }
+
+    let mut summary = TrainingBatchSummary {
+        examples: 0,
+        new_sensor_tokens: 0,
+        new_word_tokens: 0,
+        new_phrase_tokens: 0,
+        new_context_nodes: 0,
+        new_edges: 0,
+        pruned_edges: 0,
+        pruned_context_nodes: 0,
+    };
+
+    for (line_number, prompt, response) in examples {
+        let report = match brain.train_pair(&prompt, &response) {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!("Training gagal pada baris {line_number}: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        accumulate_training_summary(&mut summary, &report);
+    }
+
+    if let Err(error) = brain.save_to_path(&options.state_path) {
+        eprintln!("Gagal menyimpan brain state: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    print_training_summary(&summary, &options.file_path, &options.state_path);
     ExitCode::SUCCESS
 }
 
@@ -517,6 +673,31 @@ fn print_interaction_report(report: &InteractionReport) {
     }
 }
 
+fn accumulate_training_summary(summary: &mut TrainingBatchSummary, report: &TrainingExampleReport) {
+    summary.examples += 1;
+    summary.new_sensor_tokens += report.new_sensor_tokens.len();
+    summary.new_word_tokens += report.new_word_tokens.len();
+    summary.new_phrase_tokens += report.new_phrase_tokens.len();
+    summary.new_context_nodes += report.new_context_nodes.len();
+    summary.new_edges += report.new_edges;
+    summary.pruned_edges += report.pruned_edges;
+    summary.pruned_context_nodes += report.pruned_context_nodes;
+}
+
+fn print_training_summary(summary: &TrainingBatchSummary, file_path: &Path, state_path: &Path) {
+    println!("Training completed");
+    println!("training file       : {}", file_path.display());
+    println!("state file          : {}", state_path.display());
+    println!("examples            : {}", summary.examples);
+    println!("new sensor tokens   : {}", summary.new_sensor_tokens);
+    println!("new word tokens     : {}", summary.new_word_tokens);
+    println!("new phrase tokens   : {}", summary.new_phrase_tokens);
+    println!("new context nodes   : {}", summary.new_context_nodes);
+    println!("new edges           : {}", summary.new_edges);
+    println!("pruned edges        : {}", summary.pruned_edges);
+    println!("pruned context      : {}", summary.pruned_context_nodes);
+}
+
 fn print_brain_summary(summary: &BrainSummary) {
     println!("Brain summary");
     println!("interactions        : {}", summary.interactions);
@@ -569,6 +750,82 @@ fn print_simulation_hint(error: &SimulationError) {
     }
 }
 
+fn load_training_examples(path: &Path) -> Result<Vec<(usize, String, String)>, String> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("json") => load_personachat_examples(path),
+        _ => load_tsv_training_examples(path),
+    }
+}
+
+fn load_tsv_training_examples(path: &Path) -> Result<Vec<(usize, String, String)>, String> {
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut examples = Vec::new();
+
+    for (index, raw_line) in content.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((prompt, response)) = line.split_once('\t') else {
+            return Err(format!(
+                "baris {line_number} harus berbentuk 'prompt<TAB>response'"
+            ));
+        };
+
+        let prompt = prompt.trim();
+        let response = response.trim();
+        if prompt.is_empty() || response.is_empty() {
+            return Err(format!(
+                "baris {line_number} tidak boleh memiliki prompt atau response kosong"
+            ));
+        }
+
+        examples.push((line_number, prompt.to_string(), response.to_string()));
+    }
+
+    Ok(examples)
+}
+
+fn load_personachat_examples(path: &Path) -> Result<Vec<(usize, String, String)>, String> {
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let dataset: PersonaChatDataset =
+        serde_json::from_str(&content).map_err(|error| error.to_string())?;
+    let mut examples = Vec::new();
+
+    for dialogue in dataset.train {
+        for utterance in dialogue.utterances {
+            let Some(prompt) = utterance.history.last() else {
+                continue;
+            };
+            let Some(response) = utterance.candidates.last() else {
+                continue;
+            };
+
+            let prompt = prompt.trim();
+            let response = response.trim();
+            if prompt.is_empty() || response.is_empty() {
+                continue;
+            }
+
+            let example_number = examples.len() + 1;
+            examples.push((example_number, prompt.to_string(), response.to_string()));
+        }
+    }
+
+    if examples.is_empty() {
+        return Err("dataset JSON tidak menghasilkan pasangan prompt-response".to_string());
+    }
+
+    Ok(examples)
+}
+
 fn help_text() -> &'static str {
     "\
 rekayasa_nural_brain
@@ -578,12 +835,15 @@ Usage:
 
 Commands:
   chat        Jalankan dynamic persistent brain yang belajar dari interaksi
+  train       Latih brain dari file pasangan prompt-response
   inspect     Lihat ringkasan state brain yang tersimpan
   simulate    Jalankan simulator PSCM fixed-size lama
   help        Tampilkan bantuan
   version     Tampilkan versi
 
 Examples:
+  cargo run -- train
+  cargo run -- train --file training/id_personachat/id_personachat.json
   cargo run -- chat
   cargo run -- chat --prompt \"saya suka kopi\"
   cargo run -- inspect
@@ -614,6 +874,37 @@ Examples:
   cargo run -- chat
   cargo run -- chat --prompt \"halo brain\"
   cargo run -- chat --state data/brain.bin --word-threshold 2 --phrase-threshold 3
+"
+}
+
+fn train_help_text() -> &'static str {
+    "\
+Usage:
+  cargo run -- train [options]
+
+Options:
+  --file <path>                   File training TSV prompt-response
+  --state <path>                  Lokasi file state brain
+  --limit <n>                     Batasi jumlah contoh training yang diproses
+  --word-threshold <n>            Batas kemunculan sebelum kata dipromosikan
+  --phrase-threshold <n>          Batas kemunculan sebelum frasa dipromosikan
+  --context-threshold <n>         Batas kemunculan sebelum context node dibuat
+  --max-ngram <n>                 Panjang frasa maksimum untuk promosi
+  --context-window <n>            Panjang window konteks maksimum
+  --prune-interval <n>            Frekuensi pruning graph
+  --edge-decay <value>            Faktor decay edge saat pruning
+  --min-edge-strength <value>     Ambang hapus edge lemah
+  --response-token-limit <n>      Batas token balasan yang digenerasi
+  --memory-window <n>             Jumlah input yang diingat
+
+Format file:
+  prompt<TAB>response
+
+Examples:
+  cargo run -- train
+  cargo run -- train --file training/id_personachat/id_personachat.json
+  cargo run -- train --file training/id_personachat/id_personachat.json --limit 500
+  cargo run -- train --state data/brain.bin --file training/id_personachat/id_personachat.json
 "
 }
 
@@ -649,9 +940,4 @@ Options:
 
 fn display_char(character: char) -> char {
     if character == ' ' { '_' } else { character }
-}
-
-#[allow(dead_code)]
-fn _state_exists(path: &Path) -> bool {
-    path.exists()
 }

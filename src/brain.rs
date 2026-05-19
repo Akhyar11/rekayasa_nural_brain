@@ -375,6 +375,7 @@ pub struct BrainState {
     pub nodes: BTreeMap<u64, BrainNode>,
     pub edges: BTreeMap<String, BrainEdge>,
     pub context_patterns: BTreeMap<String, ContextPattern>,
+    pub prompt_response_memory: BTreeMap<String, BTreeMap<String, u64>>,
     pub recent_utterances: VecDeque<UtteranceMemory>,
 }
 
@@ -390,6 +391,7 @@ impl BrainState {
             nodes: BTreeMap::new(),
             edges: BTreeMap::new(),
             context_patterns: BTreeMap::new(),
+            prompt_response_memory: BTreeMap::new(),
             recent_utterances: VecDeque::new(),
         })
     }
@@ -429,11 +431,112 @@ impl BrainState {
 
     pub fn interact(&mut self, input: &str) -> Result<InteractionReport, BrainError> {
         let learning = self.learn_text(input)?;
-        let response = self.generate_response_from_tokens(&learning.token_ids)?;
+        let response =
+            if let Some(response) = self.recall_trained_response(&learning.normalized_text) {
+                response
+            } else {
+                self.generate_response_from_tokens(&learning.token_ids)?
+            };
         Ok(InteractionReport { learning, response })
     }
 
     pub fn learn_text(&mut self, input: &str) -> Result<LearningReport, BrainError> {
+        self.learn_text_internal(input, true)
+    }
+
+    pub fn train_pair(
+        &mut self,
+        prompt: &str,
+        response: &str,
+    ) -> Result<TrainingExampleReport, BrainError> {
+        let prompt_learning = self.learn_text_internal(prompt, false)?;
+        let response_learning = self.learn_text_internal(response, false)?;
+
+        let prompt_text = prompt_learning.normalized_text.clone();
+        let response_text = response_learning.normalized_text.clone();
+
+        self.interaction_count += 1;
+        let bridge_interaction = self.interaction_count;
+        let prompt_token_ids = self.tokenizer.tokenize(&prompt_text);
+        let response_token_ids = self.tokenizer.tokenize(&response_text);
+
+        if prompt_token_ids.is_empty() || response_token_ids.is_empty() {
+            return Err(BrainError::EmptyInput);
+        }
+
+        let mut combined_token_ids = prompt_token_ids.clone();
+        combined_token_ids.extend(response_token_ids.iter().copied());
+
+        let mut bridge_learning = LearningReport {
+            normalized_text: format!("{prompt_text} => {response_text}"),
+            token_count: combined_token_ids.len(),
+            new_sensor_tokens: Vec::new(),
+            new_word_tokens: Vec::new(),
+            new_phrase_tokens: Vec::new(),
+            new_context_nodes: Vec::new(),
+            new_edges: 0,
+            pruned_edges: 0,
+            pruned_context_nodes: 0,
+            token_ids: combined_token_ids,
+        };
+
+        for token_id in &bridge_learning.token_ids {
+            self.activate_node(*token_id, bridge_interaction)?;
+            self.tokenizer.touch_token(*token_id, bridge_interaction)?;
+        }
+
+        bridge_learning.new_edges +=
+            self.learn_transitions(&bridge_learning.token_ids, bridge_interaction);
+        let bridge_token_ids = bridge_learning.token_ids.clone();
+        bridge_learning.new_edges += self.learn_context_patterns(
+            &bridge_token_ids,
+            bridge_interaction,
+            &mut bridge_learning,
+        )?;
+
+        if bridge_interaction.is_multiple_of(self.config.prune_interval) {
+            let (pruned_edges, pruned_nodes) = self.prune_graph(bridge_interaction);
+            bridge_learning.pruned_edges = pruned_edges;
+            bridge_learning.pruned_context_nodes = pruned_nodes;
+        }
+
+        self.store_prompt_response_pair(&prompt_text, &response_text);
+
+        Ok(TrainingExampleReport {
+            prompt: prompt_text,
+            response: response_text,
+            prompt_token_count: prompt_token_ids.len(),
+            response_token_count: response_token_ids.len(),
+            new_sensor_tokens: merge_unique_vectors(
+                prompt_learning.new_sensor_tokens,
+                response_learning.new_sensor_tokens,
+            ),
+            new_word_tokens: merge_unique_vectors(
+                prompt_learning.new_word_tokens,
+                response_learning.new_word_tokens,
+            ),
+            new_phrase_tokens: merge_unique_vectors(
+                prompt_learning.new_phrase_tokens,
+                response_learning.new_phrase_tokens,
+            ),
+            new_context_nodes: bridge_learning.new_context_nodes,
+            new_edges: prompt_learning.new_edges
+                + response_learning.new_edges
+                + bridge_learning.new_edges,
+            pruned_edges: prompt_learning.pruned_edges
+                + response_learning.pruned_edges
+                + bridge_learning.pruned_edges,
+            pruned_context_nodes: prompt_learning.pruned_context_nodes
+                + response_learning.pruned_context_nodes
+                + bridge_learning.pruned_context_nodes,
+        })
+    }
+
+    fn learn_text_internal(
+        &mut self,
+        input: &str,
+        remember_utterance: bool,
+    ) -> Result<LearningReport, BrainError> {
         self.config.validate()?;
         let normalized_text = normalize_input(input)?;
         self.interaction_count += 1;
@@ -470,7 +573,9 @@ impl BrainState {
         report.new_edges += self.learn_transitions(&token_ids, interaction_index);
         report.new_edges +=
             self.learn_context_patterns(&token_ids, interaction_index, &mut report)?;
-        self.push_utterance(interaction_index, &normalized_text, token_ids);
+        if remember_utterance {
+            self.push_utterance(interaction_index, &normalized_text, token_ids);
+        }
 
         if interaction_index.is_multiple_of(self.config.prune_interval) {
             let (pruned_edges, pruned_nodes) = self.prune_graph(interaction_index);
@@ -483,6 +588,9 @@ impl BrainState {
 
     pub fn generate_response(&self, prompt: &str) -> Result<String, BrainError> {
         let normalized_text = normalize_input(prompt)?;
+        if let Some(response) = self.recall_trained_response(&normalized_text) {
+            return Ok(response);
+        }
         let token_ids = self.tokenizer.tokenize(&normalized_text);
         self.generate_response_from_tokens(&token_ids)
     }
@@ -1045,6 +1153,28 @@ impl BrainState {
             .map(|node| node.label.clone())
             .unwrap_or_else(|| format!("node#{node_id}"))
     }
+
+    fn store_prompt_response_pair(&mut self, prompt: &str, response: &str) {
+        let responses = self
+            .prompt_response_memory
+            .entry(prompt.to_string())
+            .or_default();
+        *responses.entry(response.to_string()).or_insert(0) += 1;
+    }
+
+    fn recall_trained_response(&self, prompt: &str) -> Option<String> {
+        let responses = self.prompt_response_memory.get(prompt)?;
+        responses
+            .iter()
+            .max_by(
+                |(left_response, left_count), (right_response, right_count)| {
+                    left_count
+                        .cmp(right_count)
+                        .then_with(|| right_response.len().cmp(&left_response.len()))
+                },
+            )
+            .map(|(response, _)| response.clone())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1065,6 +1195,21 @@ pub struct LearningReport {
 pub struct InteractionReport {
     pub learning: LearningReport,
     pub response: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrainingExampleReport {
+    pub prompt: String,
+    pub response: String,
+    pub prompt_token_count: usize,
+    pub response_token_count: usize,
+    pub new_sensor_tokens: Vec<String>,
+    pub new_word_tokens: Vec<String>,
+    pub new_phrase_tokens: Vec<String>,
+    pub new_context_nodes: Vec<String>,
+    pub new_edges: usize,
+    pub pruned_edges: usize,
+    pub pruned_context_nodes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -1121,6 +1266,13 @@ fn normalize_input(text: &str) -> Result<String, BrainError> {
 
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn merge_unique_vectors(left: Vec<String>, right: Vec<String>) -> Vec<String> {
+    let mut merged = BTreeSet::new();
+    merged.extend(left);
+    merged.extend(right);
+    merged.into_iter().collect()
 }
 
 fn token_priority(level: TokenLevel) -> u8 {
@@ -1261,5 +1413,20 @@ mod tests {
 
         assert!(summary.token_count > 0);
         assert!(summary.edge_count > 0);
+    }
+
+    #[test]
+    fn train_pair_links_prompt_to_response() {
+        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+        let training = brain
+            .train_pair("apa warna langit", "langit berwarna biru")
+            .expect("training pair should pass");
+        let response = brain
+            .generate_response("apa warna langit")
+            .expect("response generation should pass");
+
+        assert!(training.prompt_token_count > 0);
+        assert!(training.response_token_count > 0);
+        assert!(response.contains("langit") || response.contains("berwarna"));
     }
 }

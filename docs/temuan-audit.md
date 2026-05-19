@@ -13,12 +13,14 @@
 
 - Core simulasi dipindahkan ke API library yang reusable dan testable.
 - Ditambahkan CLI dengan subcommand `chat`, `inspect`, dan `simulate`.
+- Ditambahkan subcommand `train` untuk bootstrap brain dari TSV manual maupun dataset `id_personachat`.
 - Ditambahkan mode interaktif opsional.
 - Konsolidasi memori sekarang melakukan reset state neuron sebelum dan sesudah replay.
 - Hipokampus memakai `VecDeque` untuk FIFO yang lebih tepat.
 - Ditambahkan test unit untuk tokenizer, neuron, sinapsis, memori, kolom kortikal, dan simulasi.
 - Ditambahkan workflow CI untuk `fmt`, `test`, dan `clippy`.
 - Ditambahkan `dynamic persistent brain` yang memiliki checkpoint binary, tokenizer adaptif, graph node/edge yang bisa tumbuh, context node, dan pruning.
+- Ditambahkan exact prompt-response memory agar seed training awal benar-benar menanamkan respons dasar yang stabil.
 
 ## Status Siap Pakai
 

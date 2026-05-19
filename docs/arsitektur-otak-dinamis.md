@@ -27,6 +27,7 @@ Isi state mencakup:
 - node graph
 - edge transition dan context
 - pola konteks
+- memori exact prompt-response hasil training pair
 - memori input terbaru
 
 ### 2. Adaptive Tokenizer
@@ -52,6 +53,23 @@ Hubungan yang dipelajari:
 - `Transition`: urutan token ke token
 - `ContextInput`: token pembentuk konteks ke context node
 - `ContextPrediction`: context node ke token lanjutan yang diprediksi
+
+### 3A. Prompt-Response Memory
+
+Untuk bootstrap awal yang lebih stabil, mode `train` juga menyimpan memori langsung:
+
+- exact prompt
+- kandidat response
+- frekuensi kemunculan response untuk prompt tersebut
+
+Saat prompt yang sama muncul lagi, model akan memprioritaskan memori ini sebelum jatuh ke prediksi graph. Ini sengaja dipakai agar training file benar-benar berguna untuk mengurangi jawaban ngawur pada fase awal.
+
+Untuk dataset `id_personachat`, pasangan training diekstrak dari:
+
+- prompt = elemen terakhir `history`
+- response = elemen terakhir `candidates`
+
+Ini dipilih karena pada format dataset tersebut kandidat terakhir adalah respons target untuk utterance terkait.
 
 ### 4. Growth Controller
 

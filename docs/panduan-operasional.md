@@ -4,6 +4,7 @@
 
 Project ini sekarang punya dua mode utama:
 
+- `train`: bootstrap brain dari file pasangan prompt-response.
 - `chat`: mode utama untuk brain dinamis yang belajar dan menyimpan state.
 - `simulate`: mode eksperimen untuk simulator PSCM fixed-size.
 
@@ -13,6 +14,12 @@ Project ini sekarang punya dua mode utama:
 - Terminal untuk mode `chat` interaktif atau `simulate --interactive`
 
 ## Menjalankan
+
+Langkah awal yang disarankan:
+
+```bash
+cargo run -- train
+```
 
 Mode chat interaktif:
 
@@ -37,6 +44,39 @@ Jalankan simulator lama:
 ```bash
 cargo run -- simulate --input "spiking brain"
 ```
+
+## Mode Train
+
+Mode `train` membaca file TSV pasangan `prompt<TAB>response` dan menanamkan pola jawaban awal ke brain.
+
+Default file training:
+
+```text
+training/id_personachat/id_personachat.json
+```
+
+Argumen penting:
+
+- `--file <path>`: lokasi file training
+- `--state <path>`: lokasi file state
+- `--limit <n>`: batasi jumlah contoh yang diproses
+- semua argumen growth yang tersedia di mode `chat`
+
+Contoh:
+
+```bash
+cargo run -- train
+```
+
+```bash
+cargo run -- train --file training/id_personachat/id_personachat.json --limit 500
+```
+
+Catatan dataset JSON:
+
+- untuk `id_personachat`, trainer mengambil `history` terakhir sebagai prompt
+- trainer mengambil kandidat terakhir sebagai response target
+- file TSV manual masih tetap didukung untuk seed khusus
 
 ## Mode Chat
 
@@ -104,6 +144,14 @@ Mode `chat` akan:
 - membuat state baru jika file belum ada
 - memuat state lama jika file sudah ada
 - menyimpan ulang state setelah setiap interaksi
+
+Mode `train` akan:
+
+- memuat atau membuat state
+- membaca pasangan prompt-response dari file
+- menanamkan exact prompt-response memory
+- memperkuat graph dan pola konteks
+- menyimpan state biner hasil bootstrap
 
 Runtime akan gagal cepat untuk:
 

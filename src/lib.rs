@@ -9,7 +9,7 @@ pub mod tokenizer;
 
 pub use brain::{
     BrainConfig, BrainEdgeSummary, BrainError, BrainState, BrainSummary, InteractionReport,
-    LearningReport,
+    LearningReport, TrainingExampleReport,
 };
 pub use simulation::{
     ActiveTickSnapshot, ConnectionSummary, NeuronSnapshot, SimulationConfig, SimulationError,
