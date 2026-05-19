@@ -7,6 +7,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 use rekayasa_nural_brain::{
     ActiveTickSnapshot, BrainConfig, BrainEdgeSummary, BrainState, BrainSummary, ConnectionSummary,
     InteractionReport, SimulationConfig, SimulationError, SimulationReport, SpikingTokenizer,
@@ -93,6 +94,8 @@ struct TrainingRunReport<'a> {
     initial_state: &'a TrainStateSnapshot,
     final_state: &'a TrainStateSnapshot,
 }
+
+type TrainingExampleTuple = (usize, String, String);
 
 #[derive(Debug, Deserialize)]
 struct PersonaChatDataset {
@@ -590,12 +593,15 @@ fn run_train(options: TrainRuntimeOptions) -> ExitCode {
         };
         accumulate_training_summary(&mut summary, &report);
         reporter.record(example_index, line_number, &report, &summary, &brain);
-    }
 
-    if let Err(error) = brain.save_to_path(&options.state_path) {
-        reporter.abort();
-        eprintln!("Gagal menyimpan brain state: {error}");
-        return ExitCode::FAILURE;
+        if reporter.should_checkpoint(example_index) {
+            if let Err(error) = brain.save_to_path(&options.state_path) {
+                reporter.abort();
+                eprintln!("Gagal menyimpan checkpoint brain state: {error}");
+                return ExitCode::FAILURE;
+            }
+            reporter.record_checkpoint_save(example_index, &options.state_path, &brain);
+        }
     }
 
     reporter.finish();
@@ -803,10 +809,14 @@ fn print_training_start(
         effective_example_count
     ));
     reporter.println(&format!(
-        "monitoring          : progress {} | verbose {} | log every {}",
+        "monitoring          : progress {} | verbose {} | log every {} | checkpoint save ya",
         yes_no(reporter.progress_bar.is_some()),
         yes_no(reporter.verbose),
         reporter.log_every
+    ));
+    reporter.println(&format!(
+        "parallel prep       : rayon workers {}",
+        rayon::current_num_threads()
     ));
     reporter.println(&format!(
         "initial state       : interactions {} | tokens {} | ctx {} | edges {} | exact prompts {} | exact pairs {}",
@@ -999,7 +1009,7 @@ impl TrainReporter {
             ));
         }
 
-        if !self.should_log(example_index) {
+        if !self.should_checkpoint(example_index) {
             return;
         }
 
@@ -1051,10 +1061,23 @@ impl TrainReporter {
         }
     }
 
-    fn should_log(&self, example_index: usize) -> bool {
+    fn should_checkpoint(&self, example_index: usize) -> bool {
         example_index == 1
             || example_index == self.total_examples
             || example_index.is_multiple_of(self.log_every)
+    }
+
+    fn record_checkpoint_save(&self, example_index: usize, state_path: &Path, brain: &BrainState) {
+        let state = capture_train_state(brain);
+        self.println(&format!(
+            "checkpoint save     : {:>7}/{:>7} | {} | interactions {} | tokens {} | edges {}",
+            example_index,
+            self.total_examples,
+            state_path.display(),
+            state.interactions,
+            state.token_count,
+            state.edge_count
+        ));
     }
 
     fn println(&self, line: &str) {
@@ -1202,7 +1225,7 @@ fn print_simulation_hint(error: &SimulationError) {
     }
 }
 
-fn load_training_examples(path: &Path) -> Result<Vec<(usize, String, String)>, String> {
+fn load_training_examples(path: &Path) -> Result<Vec<TrainingExampleTuple>, String> {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -1214,68 +1237,113 @@ fn load_training_examples(path: &Path) -> Result<Vec<(usize, String, String)>, S
     }
 }
 
-fn load_tsv_training_examples(path: &Path) -> Result<Vec<(usize, String, String)>, String> {
+fn load_tsv_training_examples(path: &Path) -> Result<Vec<TrainingExampleTuple>, String> {
     let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let mut examples = Vec::new();
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut examples: Vec<Result<Option<TrainingExampleTuple>, String>> = lines
+        .into_par_iter()
+        .enumerate()
+        .map(|(index, raw_line): (usize, &str)| {
+            let line_number = index + 1;
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return Ok(None);
+            }
 
-    for (index, raw_line) in content.lines().enumerate() {
-        let line_number = index + 1;
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let Some((prompt, response)) = line.split_once('\t') else {
-            return Err(format!(
-                "baris {line_number} harus berbentuk 'prompt<TAB>response'"
-            ));
-        };
-
-        let prompt = prompt.trim();
-        let response = response.trim();
-        if prompt.is_empty() || response.is_empty() {
-            return Err(format!(
-                "baris {line_number} tidak boleh memiliki prompt atau response kosong"
-            ));
-        }
-
-        examples.push((line_number, prompt.to_string(), response.to_string()));
-    }
-
-    Ok(examples)
-}
-
-fn load_personachat_examples(path: &Path) -> Result<Vec<(usize, String, String)>, String> {
-    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let dataset: PersonaChatDataset =
-        serde_json::from_str(&content).map_err(|error| error.to_string())?;
-    let mut examples = Vec::new();
-
-    for dialogue in dataset.train {
-        for utterance in dialogue.utterances {
-            let Some(prompt) = utterance.history.last() else {
-                continue;
-            };
-            let Some(response) = utterance.candidates.last() else {
-                continue;
+            let Some((prompt, response)) = line.split_once('\t') else {
+                return Err(format!(
+                    "baris {line_number} harus berbentuk 'prompt<TAB>response'"
+                ));
             };
 
             let prompt = prompt.trim();
             let response = response.trim();
             if prompt.is_empty() || response.is_empty() {
-                continue;
+                return Err(format!(
+                    "baris {line_number} tidak boleh memiliki prompt atau response kosong"
+                ));
             }
 
-            let example_number = examples.len() + 1;
-            examples.push((example_number, prompt.to_string(), response.to_string()));
+            Ok(Some((
+                line_number,
+                prompt.to_string(),
+                response.to_string(),
+            )))
+        })
+        .collect();
+
+    examples.sort_by(|left, right| match (left, right) {
+        (Ok(Some((left_line, _, _))), Ok(Some((right_line, _, _)))) => left_line.cmp(right_line),
+        (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+        (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    });
+
+    let mut ordered_examples = Vec::new();
+    for example in examples {
+        match example {
+            Ok(Some(example)) => ordered_examples.push(example),
+            Ok(None) => {}
+            Err(error) => return Err(error),
         }
     }
+
+    Ok(ordered_examples)
+}
+
+fn load_personachat_examples(path: &Path) -> Result<Vec<TrainingExampleTuple>, String> {
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let dataset: PersonaChatDataset =
+        serde_json::from_str(&content).map_err(|error| error.to_string())?;
+    let mut examples = dataset
+        .train
+        .into_par_iter()
+        .enumerate()
+        .map(|(dialogue_index, dialogue)| {
+            dialogue
+                .utterances
+                .into_iter()
+                .enumerate()
+                .filter_map(|(utterance_index, utterance)| {
+                    let prompt = utterance.history.last()?.trim();
+                    let response = utterance.candidates.last()?.trim();
+                    if prompt.is_empty() || response.is_empty() {
+                        return None;
+                    }
+
+                    Some((
+                        dialogue_index,
+                        utterance_index,
+                        prompt.to_string(),
+                        response.to_string(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
 
     if examples.is_empty() {
         return Err("dataset JSON tidak menghasilkan pasangan prompt-response".to_string());
     }
 
-    Ok(examples)
+    examples.sort_by(
+        |(left_dialogue, left_utterance, _, _), (right_dialogue, right_utterance, _, _)| {
+            left_dialogue
+                .cmp(right_dialogue)
+                .then_with(|| left_utterance.cmp(right_utterance))
+        },
+    );
+
+    Ok(examples
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, (_dialogue_index, _utterance_index, prompt, response))| {
+                (index + 1, prompt, response)
+            },
+        )
+        .collect())
 }
 
 fn help_text() -> &'static str {
@@ -1339,7 +1407,7 @@ Options:
   --state <path>                  Lokasi file state brain
   --limit <n>                     Batasi jumlah contoh training yang diproses
   --verbose                       Tampilkan prompt-response di checkpoint log
-  --log-every <n>                 Cetak checkpoint detail tiap n contoh
+  --log-every <n>                 Cetak checkpoint detail dan save .bin tiap n contoh
   --no-progress                   Nonaktifkan progress bar terminal
   --word-threshold <n>            Batas kemunculan sebelum kata dipromosikan
   --phrase-threshold <n>          Batas kemunculan sebelum frasa dipromosikan
@@ -1354,6 +1422,10 @@ Options:
 
 Format file:
   JSON PersonaChat atau prompt<TAB>response
+
+Catatan:
+  Preparasi dataset menggunakan rayon secara paralel.
+  Update brain tetap diproses berurutan agar state belajar tetap konsisten.
 
 Examples:
   cargo run -- train

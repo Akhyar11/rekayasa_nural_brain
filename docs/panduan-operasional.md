@@ -88,8 +88,9 @@ Catatan dataset JSON:
 Output monitoring saat `train`:
 
 - progress bar dengan contoh terproses, persentase, throughput, ETA, dan growth terakhir
-- checkpoint periodik yang menampilkan token prompt/response, pertumbuhan graph, dan ukuran state saat ini
+- checkpoint periodik yang menampilkan token prompt/response, pertumbuhan graph, ukuran state saat ini, dan langsung menyimpan checkpoint `.bin`
 - ringkasan akhir yang menampilkan durasi, rata-rata contoh per detik, dan delta state sebelum/sesudah training
+- preparasi dataset memakai `rayon` secara paralel, tetapi update brain tetap diproses berurutan agar hasil belajar tetap deterministik
 
 ## Mode Chat
 
@@ -165,6 +166,8 @@ Mode `train` akan:
 - menanamkan exact prompt-response memory
 - memperkuat graph dan pola konteks
 - menampilkan progress bar dan checkpoint monitoring selama proses training
+- menyimpan checkpoint `.bin` pada setiap checkpoint monitoring
+- memakai `rayon` untuk mempercepat pembacaan dan preparasi dataset
 - menyimpan state biner hasil bootstrap
 
 Runtime akan gagal cepat untuk:

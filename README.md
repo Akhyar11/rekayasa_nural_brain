@@ -22,7 +22,7 @@ Default `train` sekarang memakai dataset:
 training/id_personachat/id_personachat.json
 ```
 
-Selama `train`, CLI sekarang menampilkan progress bar, checkpoint periodik, throughput, dan ringkasan pertumbuhan state.
+Selama `train`, CLI sekarang menampilkan progress bar, checkpoint periodik, throughput, dan ringkasan pertumbuhan state. Setiap checkpoint juga langsung menyimpan state `.bin`, dan preparasi dataset dipercepat dengan `rayon`.
 
 Bootstrap dari file sendiri:
 
