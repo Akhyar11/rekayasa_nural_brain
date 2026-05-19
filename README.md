@@ -1,19 +1,34 @@
 # rekayasa_nural_brain
 
-Prototype `Predictive Spiking Cognitive Model (PSCM)` berbasis Rust untuk simulasi tokenizer spike, kolom kortikal, neuromodulator, dan konsolidasi memori.
+Prototype Rust untuk dua mode kerja:
 
-Dokumentasi operasional dan hasil audit ada di [docs/README.md](docs/README.md).
+- `chat`: dynamic persistent brain yang belajar dari interaksi dan menyimpan state.
+- `simulate`: simulator PSCM fixed-size untuk eksperimen arsitektur lama.
+
+Dokumentasi utama ada di [docs/README.md](docs/README.md).
 
 ## Jalankan
 
 ```bash
-cargo run --
+cargo run -- chat
 ```
 
-Mode interaktif:
+Satu interaksi lalu simpan state:
 
 ```bash
-cargo run -- --interactive --tick-ms 60
+cargo run -- chat --prompt "saya suka kopi"
+```
+
+Lihat ringkasan state brain:
+
+```bash
+cargo run -- inspect
+```
+
+Jalankan simulator lama:
+
+```bash
+cargo run -- simulate --input "spiking brain"
 ```
 
 ## Verifikasi

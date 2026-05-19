@@ -2,55 +2,116 @@
 
 ## Ringkasan
 
-Project ini menyediakan simulasi PSCM yang sekarang bisa dijalankan dalam dua mode:
+Project ini sekarang punya dua mode utama:
 
-- Mode ringkas default untuk penggunaan cepat dan output stabil.
-- Mode interaktif untuk observasi tick-by-tick di terminal.
+- `chat`: mode utama untuk brain dinamis yang belajar dan menyimpan state.
+- `simulate`: mode eksperimen untuk simulator PSCM fixed-size.
 
 ## Prasyarat
 
 - Rust toolchain stabil
-- Terminal untuk mode interaktif
+- Terminal untuk mode `chat` interaktif atau `simulate --interactive`
 
 ## Menjalankan
 
-```bash
-cargo run --
-```
-
-Contoh dengan input khusus:
+Mode chat interaktif:
 
 ```bash
-cargo run -- --input "spiking brain"
+cargo run -- chat
 ```
 
-Mode interaktif:
+Mode chat satu kali lalu simpan state:
 
 ```bash
-cargo run -- --interactive --tick-ms 60
+cargo run -- chat --prompt "saya suka kopi"
 ```
 
-## Argumen CLI
+Lihat state yang tersimpan:
 
-- `--input <text>`: hanya mendukung karakter `a-z` dan spasi.
-- `--steps-per-char <n>`: jumlah tick aktif per karakter.
-- `--context-neurons <n>`: jumlah neuron konteks di lapisan L2/3.
-- `--hippocampus-capacity <n>`: kapasitas buffer episodik.
-- `--replay-epochs <n>`: jumlah epoch replay saat tidur.
-- `--lr-ltp <value>` dan `--lr-ltd <value>`: learning rate plastisitas.
-- `--decay <value>`: decay neuromodulator antara `0.0` dan `1.0`.
-- `--interactive`: aktifkan dashboard simulasi.
-- `--tick-ms <n>`: delay antar tick untuk mode interaktif.
-- `--no-ansi`: nonaktifkan clear-screen ANSI.
+```bash
+cargo run -- inspect
+```
 
-## Sifat Output
+Jalankan simulator lama:
 
-- Mode default menampilkan ringkasan hasil simulasi dan koneksi terkuat.
-- Mode interaktif menampilkan status L4, L2/3, error prediksi, dan keadaan neuromodulator pada setiap tick.
+```bash
+cargo run -- simulate --input "spiking brain"
+```
 
-## Validasi Input
+## Mode Chat
 
-Runtime sekarang gagal cepat untuk kasus berikut:
+Default file state:
+
+```text
+.brain/brain_state.bin
+```
+
+Perintah REPL:
+
+- `/stats`: tampilkan ringkasan graph saat ini
+- `/save`: simpan state secara manual
+- `/quit` atau `/exit`: keluar dan simpan state
+
+Argumen penting:
+
+- `--state <path>`: lokasi file state
+- `--prompt <text>`: jalankan satu interaksi tanpa masuk REPL
+- `--word-threshold <n>`: ambang promosi kata
+- `--phrase-threshold <n>`: ambang promosi frasa
+- `--context-threshold <n>`: ambang pembuatan context node
+- `--max-ngram <n>`: panjang frasa maksimum
+- `--context-window <n>`: panjang context window maksimum
+- `--prune-interval <n>`: interval pruning graph
+- `--edge-decay <value>`: decay edge lama
+- `--min-edge-strength <value>`: ambang edge lemah
+- `--response-token-limit <n>`: panjang maksimum respons yang dihasilkan
+- `--memory-window <n>`: jumlah input terakhir yang disimpan
+
+## Mode Inspect
+
+Mode `inspect` memuat file state lalu menampilkan:
+
+- jumlah interaksi
+- total token
+- komposisi sensor/word/phrase token
+- jumlah context node
+- jumlah edge
+- token terbaru
+- edge terkuat
+
+## Mode Simulate
+
+Mode ini mempertahankan simulator PSCM lama.
+
+Argumen penting:
+
+- `--input <text>`
+- `--steps-per-char <n>`
+- `--context-neurons <n>`
+- `--hippocampus-capacity <n>`
+- `--replay-epochs <n>`
+- `--lr-ltp <value>`
+- `--lr-ltd <value>`
+- `--decay <value>`
+- `--interactive`
+- `--tick-ms <n>`
+- `--no-ansi`
+
+## Validasi dan Persistence
+
+Mode `chat` akan:
+
+- membuat state baru jika file belum ada
+- memuat state lama jika file sudah ada
+- menyimpan ulang state setelah setiap interaksi
+
+Runtime akan gagal cepat untuk:
+
+- input kosong
+- konfigurasi growth yang tidak valid
+- file state rusak atau versi state tidak cocok
+
+Mode `simulate` akan gagal cepat untuk:
 
 - input kosong
 - karakter selain `a-z` dan spasi

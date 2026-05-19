@@ -12,20 +12,21 @@
 ## Penguatan yang Diterapkan
 
 - Core simulasi dipindahkan ke API library yang reusable dan testable.
-- Ditambahkan CLI dengan validasi runtime dan default output ringkas.
+- Ditambahkan CLI dengan subcommand `chat`, `inspect`, dan `simulate`.
 - Ditambahkan mode interaktif opsional.
 - Konsolidasi memori sekarang melakukan reset state neuron sebelum dan sesudah replay.
 - Hipokampus memakai `VecDeque` untuk FIFO yang lebih tepat.
 - Ditambahkan test unit untuk tokenizer, neuron, sinapsis, memori, kolom kortikal, dan simulasi.
 - Ditambahkan workflow CI untuk `fmt`, `test`, dan `clippy`.
+- Ditambahkan `dynamic persistent brain` yang memiliki checkpoint binary, tokenizer adaptif, graph node/edge yang bisa tumbuh, context node, dan pruning.
 
 ## Status Siap Pakai
 
-Project ini sekarang siap dipakai sebagai simulasi terminal dan basis eksperimen Rust yang lebih stabil. Ini masih belum siap untuk klaim model bahasa biologis skala produksi karena:
+Project ini sekarang siap dipakai sebagai fondasi eksperimen brain dinamis yang persisten sekaligus tetap menyediakan simulator terminal lama. Ini masih belum siap untuk klaim model bahasa biologis skala produksi karena:
 
 - belum ada benchmark performa
-- belum ada persistence model/checkpoint
 - belum ada dataset training/evaluation formal
 - belum ada metrik kualitas prediksi bahasa
+- respons masih berbasis continuation graph dan belum memakai representasi semantik yang dalam
 
-Untuk tahap berikutnya, fokus yang paling bernilai adalah menambahkan benchmark, serialisasi state model, dan evaluasi prediksi berbasis corpus kecil.
+Untuk tahap berikutnya, fokus yang paling bernilai adalah benchmark, evaluasi berbasis corpus, similarity/embedding layer, dan kompresi graph konseptual.
