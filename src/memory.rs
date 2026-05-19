@@ -1,12 +1,13 @@
 use crate::cortical::CorticalColumn;
 use crate::neuromodulator::Neuromodulator;
+use std::collections::VecDeque;
 
 /// Modul Hipokampus (Memori Jangka Pendek & Fast-Binding)
 /// Hipokampus merekam representasi temporal dinamis dari Lapisan L2/3 Neokorteks
 /// secara instan selama fase aktif (bangun).
 pub struct Hippocampus {
     /// Buffer temporal yang merekam deretan spike L2/3 secara runtun waktu
-    pub episodic_buffer: Vec<Vec<bool>>,
+    pub episodic_buffer: VecDeque<Vec<bool>>,
     /// Kapasitas maksimum buffer memori jangka pendek
     pub capacity: usize,
 }
@@ -14,7 +15,7 @@ pub struct Hippocampus {
 impl Hippocampus {
     pub fn new(capacity: usize) -> Self {
         Self {
-            episodic_buffer: Vec::new(),
+            episodic_buffer: VecDeque::new(),
             capacity,
         }
     }
@@ -22,10 +23,9 @@ impl Hippocampus {
     /// Merekam pola penembakan neuron (spike) dari L2/3
     pub fn record(&mut self, l23_spikes: Vec<bool>) {
         if self.episodic_buffer.len() >= self.capacity {
-            // Jika melebihi kapasitas, buang memori paling usang (FIFO)
-            self.episodic_buffer.remove(0);
+            self.episodic_buffer.pop_front();
         }
-        self.episodic_buffer.push(l23_spikes);
+        self.episodic_buffer.push_back(l23_spikes);
     }
 
     /// Membersihkan memori jangka pendek (setelah konsolidasi sukses)
@@ -38,6 +38,12 @@ impl Hippocampus {
 /// Mengelola proses konsolidasi memori jangka pendek dari Hipokampus
 /// ke dalam sinapsis jangka panjang Neokorteks melalui simulasi tidur (Sleep Replay).
 pub struct MemoryConsolidator;
+
+impl Default for MemoryConsolidator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MemoryConsolidator {
     pub fn new() -> Self {
@@ -59,11 +65,12 @@ impl MemoryConsolidator {
         }
 
         let mut replay_ticks = 0;
-        
+
         // Neuromodulasi dalam keadaan tidur: Asetilkolin (ACh) rendah, Dopamin (DA) sedikit aktif
         // Ini merepresentasikan "Non-REM / REM Sleep" di mana plastisitas tetap berjalan tapi atensi sensorik mati
         nm.acetylcholine = 0.05;
         nm.dopamine = 0.3;
+        column.reset_neurons();
 
         for _epoch in 0..epochs {
             for pattern in &hippocampus.episodic_buffer {
@@ -71,10 +78,15 @@ impl MemoryConsolidator {
                 // Kita merekonstruksi keadaan korteks dengan langsung menembakkan arus ke L2/3
                 // berdasarkan pola hipokampus, lalu membiarkan STDP menyelaraskan sinapsis.
                 let mut l23_spikes = vec![false; column.num_l23];
-                for j in 0..column.num_l23 {
+                for (j, l23_spike) in l23_spikes.iter_mut().enumerate().take(column.num_l23) {
                     // Gunakan threshold biologis normal (tanpa penurunan ACh)
-                    let current = if pattern[j] { 3.0 } else { 0.0 };
-                    l23_spikes[j] = column.l23_neurons[j].step(current, replay_ticks, nm.acetylcholine);
+                    let current = if pattern.get(j).copied().unwrap_or(false) {
+                        3.0
+                    } else {
+                        0.0
+                    };
+                    *l23_spike =
+                        column.l23_neurons[j].step(current, replay_ticks, nm.acetylcholine);
                 }
 
                 // Hitung feedback prediksi L2/3 ke L4
@@ -88,7 +100,11 @@ impl MemoryConsolidator {
                 // Di fase tidur, L4 menyala murni karena stimulasi feedback top-down (mimpi/replay)
                 let mut l4_spikes = vec![false; column.num_l4];
                 for i in 0..column.num_l4 {
-                    l4_spikes[i] = column.l4_neurons[i].step(l4_predictions[i], replay_ticks, nm.acetylcholine);
+                    l4_spikes[i] = column.l4_neurons[i].step(
+                        l4_predictions[i],
+                        replay_ticks,
+                        nm.acetylcholine,
+                    );
                 }
 
                 // Jalankan pembelajaran STDP lambat pada sinapsis feedforward & feedback
@@ -116,7 +132,31 @@ impl MemoryConsolidator {
 
         // Bersihkan Hipokampus setelah berhasil dikonsolidasikan ke Neokorteks
         hippocampus.clear();
+        column.reset_neurons();
+        nm.acetylcholine = 0.0;
+        nm.dopamine = 0.0;
 
         replay_ticks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Hippocampus;
+
+    #[test]
+    fn record_keeps_fifo_capacity() {
+        let mut hippocampus = Hippocampus::new(2);
+
+        hippocampus.record(vec![true, false]);
+        hippocampus.record(vec![false, true]);
+        hippocampus.record(vec![true, true]);
+
+        assert_eq!(hippocampus.episodic_buffer.len(), 2);
+        assert_eq!(
+            hippocampus.episodic_buffer.front(),
+            Some(&vec![false, true])
+        );
+        assert_eq!(hippocampus.episodic_buffer.back(), Some(&vec![true, true]));
     }
 }

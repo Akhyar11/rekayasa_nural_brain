@@ -33,7 +33,7 @@ impl LifNeuron {
             v_reset: 0.0,
             v_threshold_base: threshold,
             v_threshold: threshold,
-            leak_factor,
+            leak_factor: leak_factor.clamp(0.0, 1.0),
             refractory_period,
             refractory_steps_left: 0,
             has_spiked: false,
@@ -48,6 +48,7 @@ impl LifNeuron {
 
         // Neuromodulasi: ACh menurunkan ambang batas tembakan neuron agar lebih sensitif terhadap input
         // Maksimal menurunkan threshold hingga 40% dari batas dasar
+        let acetylcholine = acetylcholine.clamp(0.0, 1.0);
         self.v_threshold = self.v_threshold_base * (1.0 - 0.4 * acetylcholine);
 
         // Jika berada dalam masa refraktori, neuron tetap di potensial reset dan tidak bisa menembak
@@ -77,5 +78,20 @@ impl LifNeuron {
         self.refractory_steps_left = 0;
         self.has_spiked = false;
         self.last_spike_time = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LifNeuron;
+
+    #[test]
+    fn neuron_spikes_and_honors_refractory_period() {
+        let mut neuron = LifNeuron::new(0.9, 1.0, 2);
+
+        assert!(neuron.step(1.2, 0, 0.0));
+        assert!(!neuron.step(1.2, 1, 0.0));
+        assert!(!neuron.step(1.2, 2, 0.0));
+        assert!(neuron.step(1.2, 3, 0.0));
     }
 }

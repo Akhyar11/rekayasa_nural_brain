@@ -18,7 +18,7 @@ impl Neuromodulator {
         Self {
             acetylcholine: 0.0,
             dopamine: 0.0,
-            decay_rate,
+            decay_rate: decay_rate.clamp(0.0, 1.0),
         }
     }
 
@@ -28,8 +28,12 @@ impl Neuromodulator {
         self.dopamine *= self.decay_rate;
 
         // Jaga agar nilai tidak terlalu mendekati nol mutlak (menghindari underflow)
-        if self.acetylcholine < 0.001 { self.acetylcholine = 0.0; }
-        if self.dopamine < 0.001 { self.dopamine = 0.0; }
+        if self.acetylcholine < 0.001 {
+            self.acetylcholine = 0.0;
+        }
+        if self.dopamine < 0.001 {
+            self.dopamine = 0.0;
+        }
     }
 
     /// Memicu pelepasan Asetilkolin ketika terdeteksi "kejutan informasi" atau Prediction Error yang tinggi

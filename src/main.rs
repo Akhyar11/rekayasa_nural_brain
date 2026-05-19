@@ -1,207 +1,279 @@
-mod tokenizer;
-mod neuron;
-mod synapse;
-mod neuromodulator;
-mod cortical;
-mod memory;
-
-use tokenizer::SpikingTokenizer;
-use cortical::CorticalColumn;
-use neuromodulator::Neuromodulator;
-use memory::{Hippocampus, MemoryConsolidator};
+use std::env;
+use std::io::{self, IsTerminal, Write};
+use std::process::ExitCode;
 use std::thread::sleep;
 use std::time::Duration;
 
-fn main() {
-    // Teks ANSI untuk estetika visual premium di terminal Linux
-    println!("\x1b[1;36m================================================================================\x1b[0m");
-    println!("\x1b[1;32m      PREDICTIVE SPIKING COGNITIVE MODEL (PSCM) - SIMULASI SENSORY & MEMORY\x1b[0m");
-    println!("\x1b[1;36m================================================================================\x1b[0m");
-    println!("Menginisialisasi sistem...");
+use rekayasa_nural_brain::{
+    ActiveTickSnapshot, ConnectionSummary, SimulationConfig, SimulationError, SimulationReport,
+    SpikingTokenizer, run_simulation, run_simulation_with_observer,
+};
 
-    // 1. Inisialisasi komponen dasar
+struct RuntimeOptions {
+    config: SimulationConfig,
+    interactive: bool,
+    ansi: bool,
+    tick_delay_ms: u64,
+}
+
+fn main() -> ExitCode {
+    let options = match parse_args(env::args().skip(1)) {
+        Ok(Some(options)) => options,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}\n");
+            eprintln!("{}", help_text());
+            return ExitCode::FAILURE;
+        }
+    };
+
     let tokenizer = SpikingTokenizer::new();
-    // 27 input neuron (a-z + space) -> 8 neuron konteks L2/3
-    let mut column = CorticalColumn::new(27, 8);
-    let mut nm = Neuromodulator::new(0.85); // Peluruhan neuromodulator 15% per tick
-    let mut hippocampus = Hippocampus::new(500);
-    let consolidator = MemoryConsolidator::new();
+    let result = if options.interactive {
+        run_simulation_with_observer(&options.config, |snapshot| {
+            render_dashboard(snapshot, &tokenizer, options.ansi);
+            if options.tick_delay_ms > 0 {
+                sleep(Duration::from_millis(options.tick_delay_ms));
+            }
+        })
+    } else {
+        run_simulation(&options.config)
+    };
 
-    // Parameter pembelajaran STDP
-    let lr_ltp = 0.05;
-    let lr_ltd = 0.02;
+    match result {
+        Ok(report) => {
+            print_summary(&report);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Simulasi gagal: {error}");
+            print_runtime_hint(&error);
+            ExitCode::FAILURE
+        }
+    }
+}
 
-    // 2. Input teks simulasi
-    let input_text = "spiking brain";
-    let steps_per_char = 8; // Setiap karakter disimulasikan selama 8 ticks
-    let spike_matrix = tokenizer.encode(input_text, steps_per_char);
-    let total_ticks = spike_matrix.len();
+fn parse_args<I>(args: I) -> Result<Option<RuntimeOptions>, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let mut options = RuntimeOptions {
+        config: SimulationConfig::default(),
+        interactive: false,
+        ansi: io::stdout().is_terminal(),
+        tick_delay_ms: 120,
+    };
 
-    println!("\x1b[34m[SISTEM]\x1b[0m Input Teks: \x1b[1;33m\"{}\"\x1b[0m", input_text);
-    println!("\x1b[34m[SISTEM]\x1b[0m Total Durasi Simulasi: \x1b[1;33m{} ticks\x1b[0m", total_ticks);
-    println!("Memulai Fase Aktif (Bangun / Mengamati Sensorik)...");
-    sleep(Duration::from_millis(1500));
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                println!("{}", help_text());
+                return Ok(None);
+            }
+            "--version" | "-V" => {
+                println!("{}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
+            }
+            "--input" => {
+                options.config.input_text = next_value(&mut args, "--input")?;
+            }
+            "--steps-per-char" => {
+                options.config.steps_per_char = parse_usize(
+                    &next_value(&mut args, "--steps-per-char")?,
+                    "--steps-per-char",
+                )?;
+            }
+            "--context-neurons" => {
+                options.config.context_neurons = parse_usize(
+                    &next_value(&mut args, "--context-neurons")?,
+                    "--context-neurons",
+                )?;
+            }
+            "--hippocampus-capacity" => {
+                options.config.hippocampus_capacity = parse_usize(
+                    &next_value(&mut args, "--hippocampus-capacity")?,
+                    "--hippocampus-capacity",
+                )?;
+            }
+            "--replay-epochs" => {
+                options.config.replay_epochs = parse_usize(
+                    &next_value(&mut args, "--replay-epochs")?,
+                    "--replay-epochs",
+                )?;
+            }
+            "--lr-ltp" => {
+                options.config.lr_ltp = parse_f32(&next_value(&mut args, "--lr-ltp")?, "--lr-ltp")?;
+            }
+            "--lr-ltd" => {
+                options.config.lr_ltd = parse_f32(&next_value(&mut args, "--lr-ltd")?, "--lr-ltd")?;
+            }
+            "--decay" => {
+                options.config.neuromodulator_decay =
+                    parse_f32(&next_value(&mut args, "--decay")?, "--decay")?;
+            }
+            "--tick-ms" => {
+                options.tick_delay_ms =
+                    parse_u64(&next_value(&mut args, "--tick-ms")?, "--tick-ms")?;
+            }
+            "--interactive" => options.interactive = true,
+            "--no-ansi" => options.ansi = false,
+            value => return Err(format!("argumen tidak dikenali: {value}")),
+        }
+    }
 
-    // 3. Loop Simulasi Fase Aktif (Bangun)
-    for t in 0..total_ticks {
-        // Bersihkan layar terminal untuk animasi dashboard yang dinamis
+    if !io::stdout().is_terminal() {
+        options.ansi = false;
+    }
+
+    Ok(Some(options))
+}
+
+fn next_value<I>(args: &mut I, flag: &str) -> Result<String, String>
+where
+    I: Iterator<Item = String>,
+{
+    args.next()
+        .ok_or_else(|| format!("nilai untuk {flag} belum diberikan"))
+}
+
+fn parse_usize(value: &str, flag: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("{flag} harus berupa integer tak negatif"))
+}
+
+fn parse_u64(value: &str, flag: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("{flag} harus berupa integer tak negatif"))
+}
+
+fn parse_f32(value: &str, flag: &str) -> Result<f32, String> {
+    value
+        .parse::<f32>()
+        .map_err(|_| format!("{flag} harus berupa angka desimal yang valid"))
+}
+
+fn render_dashboard(snapshot: &ActiveTickSnapshot, tokenizer: &SpikingTokenizer, ansi: bool) {
+    if ansi {
         print!("\x1b[2J\x1b[H");
+    }
 
-        // Identifikasi karakter sensorik yang sedang masuk
-        let char_idx = t / steps_per_char;
-        let current_char = input_text.chars().nth(char_idx).unwrap_or(' ');
-
-        // Jalankan satu langkah kolom kortikal
-        column.step(&spike_matrix[t], t, &mut nm, lr_ltp, lr_ltd);
-
-        // Rekam pola penembakan neuron L2/3 ke dalam Hipokampus
-        let l23_spikes: Vec<bool> = column.l23_neurons.iter().map(|n| n.has_spiked).collect();
-        // Jika ada neuron L2/3 yang menembak, catat di Hipokampus
-        if l23_spikes.iter().any(|&s| s) {
-            hippocampus.record(l23_spikes);
-        }
-
-        // Lakukan peluruhan senyawa neuromodulator
-        nm.step();
-
-        // ---- DRAW PREMIUM TERMINAL DASHBOARD ----
-        println!("\x1b[1;36m┌──────────────────────────────────────────────────────────────────────────────┐\x1b[0m");
-        println!(
-            "\x1b[1;36m│\x1b[0m \x1b[1;32mPSCM ACTIVE SENSORY SIMULATION DASHBOARD\x1b[0m                                     \x1b[1;36m│\x1b[0m"
-        );
-        println!("\x1b[1;36m├──────────────────────────────────────────────────────────────────────────────┤\x1b[0m");
-        println!(
-            "\x1b[1;36m│\x1b[0m Waktu Simulasi : Tick \x1b[1;33m{:03}/{:03}\x1b[0m  |  Karakter Masuk: [\x1b[1;35m {}\x1b[0m ]                   \x1b[1;36m│\x1b[0m",
-            t, total_ticks, current_char
-        );
-        println!("\x1b[1;36m├──────────────────────────────────────────────────────────────────────────────┤\x1b[0m");
-
-        // Tampilkan aktivitas Spikes L4 (Bottom-Up)
-        print!("\x1b[1;36m│\x1b[0m \x1b[1mSpikes L4 (Sensory):\x1b[0m ");
-        for idx in 0..27 {
-            let n_char = tokenizer.decode_char(idx);
-            if column.l4_neurons[idx].has_spiked {
-                print!("\x1b[1;31m{}\x1b[0m", n_char);
-            } else if spike_matrix[t][idx] {
-                print!("\x1b[33m*\x1b[0m"); // Calon spike
+    let sensory_line = snapshot
+        .input_spikes
+        .iter()
+        .enumerate()
+        .map(|(index, input_spike)| {
+            let fired = snapshot.l4_spikes.get(index).copied().unwrap_or(false);
+            if fired {
+                display_char(tokenizer.decode_char(index)).to_ascii_uppercase()
+            } else if *input_spike {
+                '*'
             } else {
-                print!(".");
+                '.'
             }
-        }
-        println!("             \x1b[1;36m│\x1b[0m");
+        })
+        .collect::<String>();
 
-        // Tampilkan Aktivitas Neuron L2/3 (Konteks Global)
-        println!("\x1b[1;36m│\x1b[0m                                                                              \x1b[1;36m│\x1b[0m");
+    println!("PSCM ACTIVE SIMULATION");
+    println!(
+        "tick {:03}/{:03} | input '{}' | prediction error {:.2}",
+        snapshot.tick + 1,
+        snapshot.total_ticks,
+        display_char(snapshot.current_char),
+        snapshot.prediction_error
+    );
+    println!(
+        "ACh {:.2} | DA {:.2} | hippocampus {}",
+        snapshot.neuromodulator.acetylcholine,
+        snapshot.neuromodulator.dopamine,
+        snapshot.hippocampus_size
+    );
+    println!("L4 sensory: {sensory_line}");
+
+    for (index, neuron) in snapshot.l23_neurons.iter().enumerate() {
+        let bar_length = (neuron.membrane_potential * 10.0).clamp(0.0, 10.0) as usize;
+        let bar = format!("{}{}", "#".repeat(bar_length), "-".repeat(10 - bar_length));
+        let status = if neuron.has_spiked {
+            "SPIKE"
+        } else if neuron.refractory_steps_left > 0 {
+            "REFRA"
+        } else {
+            "IDLE "
+        };
         println!(
-            "\x1b[1;36m│\x1b[0m \x1b[1mStatus Lapisan Neokorteks Atas (L2/3 Context):\x1b[0m                               \x1b[1;36m│\x1b[0m"
+            "L23 #{:02} [{}] V:[{}] threshold {:.2}",
+            index, status, bar, neuron.threshold
         );
-        for j in 0..column.num_l23 {
-            let neuron = &column.l23_neurons[j];
-            let spike_symbol = if neuron.has_spiked {
-                "\x1b[1;32m⚡ SPIKE\x1b[0m"
-            } else if neuron.refractory_steps_left > 0 {
-                "\x1b[31m▓ REFRA\x1b[0m"
-            } else {
-                "░ IDLE "
-            };
+    }
 
-            // Bar visual untuk potensial membran (V)
-            let mut v_bar = String::new();
-            let bar_len = (neuron.v * 10.0).max(0.0).min(10.0) as usize;
-            for _ in 0..bar_len {
-                v_bar.push('█');
-            }
-            for _ in bar_len..10 {
-                v_bar.push(' ');
-            }
+    println!();
+    let _ = io::stdout().flush();
+}
 
-            println!(
-                "\x1b[1;36m│\x1b[0m   Neuron #{:02} [{}] V: [{}\x1b[0m] Thres: {:.2}                     \x1b[1;36m│\x1b[0m",
-                j, spike_symbol, v_bar, neuron.v_threshold
+fn print_summary(report: &SimulationReport) {
+    println!("PSCM simulation completed");
+    println!("input text           : {}", report.input_text);
+    println!("active ticks         : {}", report.total_ticks);
+    println!("recorded patterns    : {}", report.recorded_patterns);
+    println!("replay ticks         : {}", report.replay_ticks);
+    println!();
+    println!("Top feedforward connections:");
+    print_connections(&report.top_feedforward);
+    println!();
+    println!("Top feedback connections:");
+    print_connections(&report.top_feedback);
+}
+
+fn print_connections(connections: &[ConnectionSummary]) {
+    for connection in connections {
+        println!(
+            "- {} -> {} | weight {:.2}",
+            connection.source_label, connection.target_label, connection.weight
+        );
+    }
+}
+
+fn print_runtime_hint(error: &SimulationError) {
+    match error {
+        SimulationError::Tokenizer(_) | SimulationError::EmptyInput => {
+            eprintln!(
+                "Hint: gunakan hanya karakter a-z dan spasi, misalnya --input \"spiking brain\""
             );
         }
-
-        println!("\x1b[1;36m├──────────────────────────────────────────────────────────────────────────────┤\x1b[0m");
-        println!(
-            "\x1b[1;36m│\x1b[0m \x1b[1mKondisi Kimiawi Otak & Eror Kognitif:\x1b[0m                                         \x1b[1;36m│\x1b[0m"
-        );
-        let error_level = column.current_prediction_error;
-        let mut error_bar = String::new();
-        let err_len = (error_level * 5.0).min(15.0) as usize;
-        for _ in 0..err_len {
-            error_bar.push('█');
-        }
-        for _ in err_len..15 {
-            error_bar.push('░');
-        }
-
-        println!(
-            "\x1b[1;36m│\x1b[0m   Eror Prediksi Lokal: [\x1b[1;31m{}\x1b[0m] ({:.1})                                  \x1b[1;36m│\x1b[0m",
-            error_bar, error_level
-        );
-        println!(
-            "\x1b[1;36m│\x1b[0m   Neuromodulator     : {}                      \x1b[1;36m│\x1b[0m",
-            nm.status_string()
-        );
-        println!(
-            "\x1b[1;36m│\x1b[0m   Memori Hipokampus  : \x1b[1;35m{:>3}\x1b[0m pola tersimpan                                    \x1b[1;36m│\x1b[0m",
-            hippocampus.episodic_buffer.len()
-        );
-        println!("\x1b[1;36m└──────────────────────────────────────────────────────────────────────────────┘\x1b[0m");
-
-        // Lambatkan langkah agar terlihat efek animasi di terminal
-        sleep(Duration::from_millis(180));
+        _ => {}
     }
+}
 
-    println!("\x1b[1;32m[SUKSES]\x1b[0m Fase Aktif selesai!");
-    println!("\x1b[1;34m[INFO]\x1b[0m Hipokampus telah merekam \x1b[1;35m{} pola sensorik temporal\x1b[0m.", hippocampus.episodic_buffer.len());
-    println!("Mempersiapkan Fase Tidur (Sleep-Replay Consolidation)...");
-    sleep(Duration::from_millis(3000));
+fn help_text() -> &'static str {
+    "\
+rekayasa_nural_brain
 
-    // 4. Jalankan Fase Replay / Konsolidasi Memori Jangka Panjang (Tidur)
-    print!("\x1b[2J\x1b[H");
-    println!("\x1b[1;35m================================================================================\x1b[0m");
-    println!("\x1b[1;35m                  FASE TIDUR (OFF-LINE MEMORY CONSOLIDATION)\x1b[0m");
-    println!("\x1b[1;35m================================================================================\x1b[0m");
-    println!("Mensimulasikan gelombang tidur lambat (Slow-Wave Sleep)...");
-    println!("Memutar ulang pola aktivitas Hipokampus ke Neokorteks...");
-    sleep(Duration::from_millis(1500));
+Usage:
+  cargo run -- [options]
 
-    let replay_ticks = consolidator.consolidate(&mut column, &mut nm, &mut hippocampus, 10);
+Options:
+  --input <text>                  Teks input untuk simulasi
+  --steps-per-char <n>            Jumlah tick per karakter
+  --context-neurons <n>           Jumlah neuron konteks L2/3
+  --hippocampus-capacity <n>      Kapasitas buffer hipokampus
+  --replay-epochs <n>             Jumlah epoch replay tidur
+  --lr-ltp <value>                Learning rate LTP
+  --lr-ltd <value>                Learning rate LTD
+  --decay <value>                 Decay neuromodulator (0.0 - 1.0)
+  --interactive                   Tampilkan dashboard tick-by-tick
+  --tick-ms <n>                   Delay antar tick saat mode interaktif
+  --no-ansi                       Nonaktifkan clear-screen ANSI
+  --help, -h                      Tampilkan bantuan
+  --version, -V                   Tampilkan versi
 
-    println!("\x1b[1;32m[SUKSES]\x1b[0m Konsolidasi selesai!");
-    println!("Telah melakukan \x1b[1;33m{} ticks\x1b[0m replay asinkron di Neokorteks.", replay_ticks);
-    println!("Semua pola dari Hipokampus telah ditransfer dan dihapus.");
-    println!("\x1b[1;36m--------------------------------------------------------------------------------\x1b[0m");
+Examples:
+  cargo run --
+  cargo run -- --input \"brain plasticity\"
+  cargo run -- --interactive --tick-ms 60
+"
+}
 
-    // 5. Analisis Hasil Konsolidasi Bobot
-    println!("\x1b[1;32m[ANALISIS]\x1b[0m Peta Kekuatan Sinapsis Neokorteks Jangka Panjang (L4 <-> L2/3):");
-    
-    // Cari sinapsis terkuat untuk memberikan bukti empiris pembelajaran
-    column.feedforward_synapses.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap());
-    column.feedback_synapses.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap());
-
-    println!("\n\x1b[1mTop 3 Koneksi Feedforward (L4 -> L2/3) Terkuat (Asosiasi Fitur ke Konteks):\x1b[0m");
-    for i in 0..3 {
-        let syn = &column.feedforward_synapses[i];
-        let ch = tokenizer.decode_char(syn.pre_idx);
-        println!(
-            "  - Input '\x1b[1;33m{}\x1b[0m' (Neuron #{:02}) ──► Konteks #{:02}  |  Bobot Sinaptik: \x1b[1;32m{:.2}\x1b[0m",
-            ch, syn.pre_idx, syn.post_idx, syn.weight
-        );
-    }
-
-    println!("\n\x1b[1mTop 3 Koneksi Feedback (L2/3 -> L4) Terkuat (Sinyal Prediktif Konteks ke Fitur):\x1b[0m");
-    for i in 0..3 {
-        let syn = &column.feedback_synapses[i];
-        let ch = tokenizer.decode_char(syn.post_idx);
-        println!(
-            "  - Konteks #{:02} ──► Prediksi '\x1b[1;33m{}\x1b[0m' (Neuron #{:02})  |  Bobot Sinaptik: \x1b[1;32m{:.2}\x1b[0m",
-            syn.pre_idx, ch, syn.post_idx, syn.weight
-        );
-    }
-
-    println!("\x1b[1;36m================================================================================\x1b[0m");
-    println!("Inisialisasi dan pengujian prototipe PSCM Rust berhasil diselesaikan!");
-    println!("\x1b[1;36m================================================================================\x1b[0m");
+fn display_char(character: char) -> char {
+    if character == ' ' { '_' } else { character }
 }

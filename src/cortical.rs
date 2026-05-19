@@ -1,11 +1,14 @@
+use crate::neuromodulator::Neuromodulator;
 use crate::neuron::LifNeuron;
 use crate::synapse::Synapse;
-use crate::neuromodulator::Neuromodulator;
+use std::error::Error;
+use std::fmt;
 
 /// Cortical Column Hierarchy & Predictive Coding Module
 /// Mensimulasikan satu kolom korteks dengan dua lapisan:
 /// - Lapisan L4 (Bottom-Up / Input Fitur Lokal)
 /// - Lapisan L2/3 (Top-Down / Asosiasi Konteks Global)
+///
 /// Keduanya terhubung dua arah untuk melakukan Predictive Coding lokal.
 pub struct CorticalColumn {
     pub num_l4: usize,
@@ -21,6 +24,26 @@ pub struct CorticalColumn {
     /// Ambang batas arus prediksi untuk dianggap sebagai prediksi spike positif
     pub prediction_threshold: f32,
 }
+
+#[derive(Debug)]
+pub enum ColumnStepError {
+    InputDimensionMismatch { expected: usize, got: usize },
+}
+
+impl fmt::Display for ColumnStepError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InputDimensionMismatch { expected, got } => {
+                write!(
+                    f,
+                    "jumlah input spike tidak sesuai, expected {expected} namun dapat {got}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for ColumnStepError {}
 
 impl CorticalColumn {
     pub fn new(num_l4: usize, num_l23: usize) -> Self {
@@ -71,7 +94,14 @@ impl CorticalColumn {
         nm: &mut Neuromodulator,
         lr_ltp: f32,
         lr_ltd: f32,
-    ) {
+    ) -> Result<(), ColumnStepError> {
+        if input_spikes.len() != self.num_l4 {
+            return Err(ColumnStepError::InputDimensionMismatch {
+                expected: self.num_l4,
+                got: input_spikes.len(),
+            });
+        }
+
         // 1. Tentukan status spike L4 berdasarkan input bottom-up.
         // Dalam biologis, L4 menerima input sensorik langsung.
         let mut l4_spiked = vec![false; self.num_l4];
@@ -154,12 +184,42 @@ impl CorticalColumn {
             let post_s = l4_spiked[syn.post_idx];
             syn.update_weight(pre_s, post_s, lr_ltp, lr_ltd, nm.dopamine);
         }
+
+        Ok(())
     }
 
     /// Reset seluruh keadaan neuron (tapi pertahankan bobot sinapsis)
     pub fn reset_neurons(&mut self) {
-        for n in &mut self.l4_neurons { n.reset_state(); }
-        for n in &mut self.l23_neurons { n.reset_state(); }
+        for neuron in &mut self.l4_neurons {
+            neuron.reset_state();
+        }
+        for neuron in &mut self.l23_neurons {
+            neuron.reset_state();
+        }
         self.current_prediction_error = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ColumnStepError, CorticalColumn};
+    use crate::neuromodulator::Neuromodulator;
+
+    #[test]
+    fn reject_input_with_invalid_dimension() {
+        let mut column = CorticalColumn::new(3, 2);
+        let mut neuromodulator = Neuromodulator::new(0.9);
+
+        let error = column
+            .step(&[true, false], 0, &mut neuromodulator, 0.05, 0.02)
+            .expect_err("dimension mismatch must fail");
+
+        assert!(matches!(
+            error,
+            ColumnStepError::InputDimensionMismatch {
+                expected: 3,
+                got: 2
+            }
+        ));
     }
 }

@@ -20,7 +20,7 @@ impl Synapse {
         Self {
             pre_idx,
             post_idx,
-            weight: initial_weight,
+            weight: initial_weight.clamp(0.01, 5.0),
             pre_trace: 0.0,
             post_trace: 0.0,
         }
@@ -29,6 +29,7 @@ impl Synapse {
     /// Melakukan peluruhan jejak (trace decay) pada setiap langkah waktu diskret
     /// `decay_factor` biasanya berkisar antara 0.9 hingga 0.95
     pub fn decay_traces(&mut self, decay_factor: f32) {
+        let decay_factor = decay_factor.clamp(0.0, 1.0);
         self.pre_trace *= decay_factor;
         self.post_trace *= decay_factor;
     }
@@ -84,5 +85,21 @@ impl Synapse {
         self.weight = (self.weight + delta_w).clamp(0.01, 5.0);
 
         delta_w
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Synapse;
+
+    #[test]
+    fn weight_is_clamped_during_updates() {
+        let mut synapse = Synapse::new(0, 1, 10.0);
+        synapse.pre_trace = 2.0;
+        synapse.post_trace = 2.0;
+
+        synapse.update_weight(true, true, 1.0, 1.0, 1.0);
+
+        assert!((0.01..=5.0).contains(&synapse.weight));
     }
 }
