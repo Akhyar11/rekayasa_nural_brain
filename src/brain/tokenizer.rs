@@ -212,19 +212,29 @@ impl AdaptiveTokenizer {
         level: TokenLevel,
         interaction_index: u64,
     ) {
-        self.lookup.insert(surface.to_string(), node_id);
+        let key = match level {
+            TokenLevel::Sensor => surface.to_string(),
+            TokenLevel::Word | TokenLevel::Phrase => {
+                if surface.starts_with(WORD_BOUNDARY) {
+                    surface.to_string()
+                } else {
+                    format!("{}{}", WORD_BOUNDARY, surface)
+                }
+            }
+        };
+        self.lookup.insert(key.clone(), node_id);
         self.entries.insert(
             node_id,
             TokenEntry {
                 node_id,
-                text: surface.to_string(),
+                text: key.clone(),
                 level,
                 occurrence_count: 0,
                 created_at: interaction_index,
                 last_used_at: interaction_index,
             },
         );
-        self.trie.insert(surface, node_id, level);
+        self.trie.insert(&key, node_id, level);
     }
 
     pub fn touch_token(&mut self, node_id: u64, interaction_index: u64) -> Result<(), BrainError> {

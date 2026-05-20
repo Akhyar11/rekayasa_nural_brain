@@ -158,6 +158,8 @@ impl BrainState {
             self.promote_phrase_tokens(&normalized_text, step_index, &mut report)?;
         }
 
+        self.compress_long_sequences(&normalized_text, step_index, &mut report)?;
+
         let token_ids = self.tokenizer.tokenize(&normalized_text);
         report.token_count = token_ids.len();
         report.token_ids = token_ids.clone();
@@ -575,6 +577,59 @@ impl BrainState {
             });
         }
         
+        Ok(())
+    }
+
+    pub fn compress_long_sequences(
+        &mut self,
+        normalized_text: &str,
+        interaction_index: u64,
+        report: &mut LearningReport,
+    ) -> Result<(), BrainError> {
+        let words: Vec<&str> = normalized_text.split_whitespace().collect();
+        if words.is_empty() {
+            return Ok(());
+        }
+
+        let mut candidates = std::collections::BTreeSet::new();
+        // 1. Check individual words
+        for &word in &words {
+            let token_ids = self.tokenizer.tokenize(word);
+            if token_ids.len() > 3 {
+                candidates.insert((word.to_string(), TokenLevel::Word));
+            }
+        }
+
+        // 2. Check phrase n-grams
+        let max_ngram = self.config.max_ngram.min(words.len());
+        for ngram_size in 2..=max_ngram {
+            for start in 0..=words.len() - ngram_size {
+                let phrase = words[start..start + ngram_size].join(" ");
+                let token_ids = self.tokenizer.tokenize(&phrase);
+                if token_ids.len() > 3 {
+                    candidates.insert((phrase, TokenLevel::Phrase));
+                }
+            }
+        }
+
+        // Register candidates
+        for (surface, level) in candidates {
+            let check_key = match level {
+                TokenLevel::Sensor => surface.clone(),
+                TokenLevel::Word | TokenLevel::Phrase => {
+                    format!("{}{}", super::tokenizer::WORD_BOUNDARY, surface)
+                }
+            };
+            if !self.tokenizer.lookup.contains_key(&check_key) {
+                self.create_token_node(&surface, level, interaction_index)?;
+                match level {
+                    TokenLevel::Word => report.new_word_tokens.push(surface),
+                    TokenLevel::Phrase => report.new_phrase_tokens.push(surface),
+                    _ => {}
+                }
+            }
+        }
+
         Ok(())
     }
 }

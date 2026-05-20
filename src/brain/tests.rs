@@ -355,4 +355,21 @@ mod tests {
         
         assert!(response.contains("manis"), "Response should traverse via concept node to 'manis', but got: {}", response);
     }
+
+    #[test]
+    fn length_based_vocabulary_compression_rule() {
+        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+
+        // 1. "xyzxyzxyz" is an out-of-vocabulary word.
+        // Initially, BPE tokenizer decomposes it into character tokens (>3 tokens).
+        let initial_tokens = brain.tokenizer.tokenize("xyzxyzxyz");
+        assert!(initial_tokens.len() > 3, "Initially it should decompose to many character tokens, got: {:?}", initial_tokens);
+
+        // 2. Learn it. The compression rule detects it exceeds 3 tokens and registers it.
+        brain.learn_text("saya suka xyzxyzxyz").expect("learning should pass");
+
+        // 3. Tokenizing it now should return exactly ONE token ID.
+        let compressed_tokens = brain.tokenizer.tokenize("xyzxyzxyz");
+        assert_eq!(compressed_tokens.len(), 1, "Should compress to exactly 1 token, got: {:?}", compressed_tokens);
+    }
 }
