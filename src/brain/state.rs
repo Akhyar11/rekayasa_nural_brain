@@ -153,7 +153,7 @@ impl From<LegacyBrainStateV1> for BrainState {
 impl BrainState {
     pub fn new(config: BrainConfig) -> Result<Self, BrainError> {
         config.validate()?;
-        Ok(Self {
+        let mut state = Self {
             state_version: STATE_VERSION,
             config,
             next_node_id: 1,
@@ -167,7 +167,40 @@ impl BrainState {
             prompt_response_memory: BTreeMap::new(),
             recent_utterances: VecDeque::new(),
             prompt_inverted_index: BTreeMap::new(),
-        })
+        };
+        state.register_tokenizer_nodes()?;
+        Ok(state)
+    }
+
+    pub fn register_tokenizer_nodes(&mut self) -> Result<(), BrainError> {
+        let mut max_id = 0;
+        let entries = self.tokenizer.entries.clone();
+        for (node_id, entry) in entries {
+            if node_id > max_id {
+                max_id = node_id;
+            }
+            if !self.nodes.contains_key(&node_id) {
+                let kind = match entry.level {
+                    super::tokenizer::TokenLevel::Sensor => NodeKind::Sensor,
+                    super::tokenizer::TokenLevel::Word => NodeKind::Lexical,
+                    super::tokenizer::TokenLevel::Phrase => NodeKind::Phrase,
+                };
+                self.nodes.insert(
+                    node_id,
+                    BrainNode {
+                        id: node_id,
+                        label: entry.text.clone(),
+                        kind,
+                        activation_count: 0,
+                        last_activated_at: 0,
+                        salience: 0.0,
+                        composition: Vec::new(),
+                    },
+                );
+            }
+        }
+        self.next_node_id = self.next_node_id.max(max_id + 1);
+        Ok(())
     }
 
     pub fn rebuild_inverted_index(&mut self) {

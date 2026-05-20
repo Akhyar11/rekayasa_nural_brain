@@ -152,9 +152,11 @@ impl BrainState {
             token_ids: Vec::new(),
         };
 
-        self.ensure_sensor_tokens(&normalized_text, step_index, &mut report)?;
-        self.promote_word_tokens(&normalized_text, step_index, &mut report)?;
-        self.promote_phrase_tokens(&normalized_text, step_index, &mut report)?;
+        if self.config.dynamic_vocab {
+            self.ensure_sensor_tokens(&normalized_text, step_index, &mut report)?;
+            self.promote_word_tokens(&normalized_text, step_index, &mut report)?;
+            self.promote_phrase_tokens(&normalized_text, step_index, &mut report)?;
+        }
 
         let token_ids = self.tokenizer.tokenize(&normalized_text);
         report.token_count = token_ids.len();
@@ -457,6 +459,29 @@ impl BrainState {
     }
 
     pub fn activate_node(&mut self, node_id: u64, interaction_index: u64) -> Result<(), BrainError> {
+        if !self.nodes.contains_key(&node_id) {
+            if let Some(entry) = self.tokenizer.get(node_id) {
+                let kind = match entry.level {
+                    super::tokenizer::TokenLevel::Sensor => NodeKind::Sensor,
+                    super::tokenizer::TokenLevel::Word => NodeKind::Lexical,
+                    super::tokenizer::TokenLevel::Phrase => NodeKind::Phrase,
+                };
+                self.nodes.insert(
+                    node_id,
+                    BrainNode {
+                        id: node_id,
+                        label: entry.text.clone(),
+                        kind,
+                        activation_count: 0,
+                        last_activated_at: 0,
+                        salience: 0.0,
+                        composition: Vec::new(),
+                    },
+                );
+            } else {
+                return Err(BrainError::MissingNode(node_id));
+            }
+        }
         let node = self
             .nodes
             .get_mut(&node_id)

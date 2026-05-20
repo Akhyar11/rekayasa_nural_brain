@@ -18,7 +18,9 @@ mod tests {
 
     #[test]
     fn brain_grows_word_and_phrase_tokens() {
-        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+        let mut config = BrainConfig::default();
+        config.dynamic_vocab = true;
+        let mut brain = BrainState::new(config).expect("brain should initialize");
 
         brain
             .learn_text("halo dunia")

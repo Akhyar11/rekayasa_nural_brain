@@ -67,6 +67,8 @@ pub struct BrainConfig {
     pub max_recent_utterances: usize,
     #[serde(default)]
     pub generation_config: GenerationConfig,
+    #[serde(default)]
+    pub dynamic_vocab: bool,
 }
 
 impl Default for BrainConfig {
@@ -83,6 +85,7 @@ impl Default for BrainConfig {
             response_token_limit: 24,
             max_recent_utterances: 128,
             generation_config: GenerationConfig::default(),
+            dynamic_vocab: false,
         }
     }
 }
