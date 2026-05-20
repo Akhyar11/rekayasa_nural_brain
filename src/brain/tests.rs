@@ -372,4 +372,68 @@ mod tests {
         let compressed_tokens = brain.tokenizer.tokenize("xyzxyzxyz");
         assert_eq!(compressed_tokens.len(), 1, "Should compress to exactly 1 token, got: {:?}", compressed_tokens);
     }
+
+    #[test]
+    fn test_token_and_vocabulary_pruning() {
+        let mut config = BrainConfig::default();
+        config.dynamic_vocab = true;
+        config.prune_interval = 2; // stale_after = 8
+        let mut brain = BrainState::new(config).expect("brain should initialize");
+
+        // Learn a token
+        brain.learn_text("saya suka kopi").expect("learning should pass");
+        
+        // Find a word token that we just learned, e.g., "kopi"
+        let token_id = brain.tokenizer.lookup.get("▁kopi").copied().expect("token 'kopi' should exist");
+        
+        // Ensure it is in the entries
+        assert!(brain.tokenizer.entries.contains_key(&token_id));
+        assert!(brain.nodes.contains_key(&token_id));
+
+        // Manually set its last_used_at to 0 (very old), and make interaction_index = 10 (age = 10 >= stale_after)
+        if let Some(entry) = brain.tokenizer.entries.get_mut(&token_id) {
+            entry.last_used_at = 0;
+        }
+
+        // Run pruning at index 10
+        let (_pruned_edges, pruned_nodes) = brain.prune_graph(10);
+
+        // Verify the token is gone from tokenizer and graph nodes!
+        assert!(!brain.tokenizer.entries.contains_key(&token_id), "Token should be pruned from tokenizer");
+        assert!(!brain.tokenizer.lookup.contains_key("▁kopi"), "Token lookup should be removed");
+        assert!(!brain.nodes.contains_key(&token_id), "Token node should be pruned from graph");
+        assert!(pruned_nodes >= 1, "Should report at least 1 node pruned");
+    }
+
+    #[test]
+    fn test_generation_resurrects_pruned_tokens() {
+        let mut config = BrainConfig::default();
+        config.dynamic_vocab = true;
+        let mut brain = BrainState::new(config).expect("brain should initialize");
+
+        // Learn a dialogue pair using train_pair
+        brain.train_pair("nama kamu", "saya kopi").expect("learning should pass");
+
+        // Find the token ID for "kopi"
+        let token_id = brain.tokenizer.lookup.get("▁kopi").copied().expect("token 'kopi' should exist");
+
+        // Manually delete the token and node, simulating full pruning!
+        brain.tokenizer.entries.remove(&token_id);
+        brain.nodes.remove(&token_id);
+
+        // Verify it is physically gone
+        assert!(!brain.tokenizer.entries.contains_key(&token_id));
+        assert!(!brain.nodes.contains_key(&token_id));
+
+        // Generate response for "nama kamu" - should succeed and decode successfully via lookup resurrection!
+        let response = brain.generate_response("nama kamu").expect("Generation should succeed");
+        assert!(response.contains("kopi"), "Response should contain 'kopi', got: {}", response);
+
+        // Run interact or learn_text with "kopi" - this triggers touch_token and activate_node, physical resurrection!
+        brain.interact("saya kopi").expect("interaction should pass");
+
+        // Verify the token and node have been physically resurrected in entries and nodes!
+        assert!(brain.tokenizer.entries.contains_key(&token_id), "Token should be physically resurrected in tokenizer");
+        assert!(brain.nodes.contains_key(&token_id), "Node should be physically resurrected in graph nodes");
+    }
 }

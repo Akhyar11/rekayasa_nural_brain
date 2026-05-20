@@ -249,6 +249,37 @@ impl AdaptiveTokenizer {
     }
 
     pub fn touch_token(&mut self, node_id: u64, interaction_index: u64) -> Result<(), BrainError> {
+        if !self.entries.contains_key(&node_id) {
+            let text = if let Some(t) = self.lookup.iter().find(|&(_, &id)| id == node_id).map(|(k, _)| k.clone()) {
+                t
+            } else {
+                format!("<REVIVED_{}>", node_id)
+            };
+            self.lookup.insert(text.clone(), node_id);
+
+            let level = if text.starts_with("<") {
+                TokenLevel::Sensor
+            } else if text.chars().count() <= 1 {
+                TokenLevel::Sensor
+            } else if text.starts_with(WORD_BOUNDARY) {
+                TokenLevel::Word
+            } else {
+                TokenLevel::Phrase
+            };
+
+            self.entries.insert(
+                node_id,
+                TokenEntry {
+                    node_id,
+                    text,
+                    level,
+                    occurrence_count: 0,
+                    created_at: interaction_index,
+                    last_used_at: interaction_index,
+                },
+            );
+        }
+
         let token = self
             .entries
             .get_mut(&node_id)
@@ -311,8 +342,13 @@ impl AdaptiveTokenizer {
                 if text != BOS_TOKEN && text != EOS_TOKEN && text != PAD_TOKEN && text != UNK_TOKEN {
                     tokens.push(text.clone());
                 }
+            } else if let Some(text) = self.lookup.iter().find(|&(_, &val)| val == id).map(|(k, _)| k.clone()) {
+                if text != BOS_TOKEN && text != EOS_TOKEN && text != PAD_TOKEN && text != UNK_TOKEN {
+                    tokens.push(text);
+                }
             } else {
-                return Err(BrainError::MissingToken(id));
+                let text = format!("<REVIVED_{}>", id);
+                tokens.push(text);
             }
         }
         let merged = tokens.join("").replace(WORD_BOUNDARY, " ");

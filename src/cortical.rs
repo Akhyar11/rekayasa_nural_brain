@@ -106,7 +106,7 @@ impl CorticalColumn {
         // Dalam biologis, L4 menerima input sensorik langsung.
         let mut l4_spiked = vec![false; self.num_l4];
         for i in 0..self.num_l4 {
-            // Berikan arus besar (2.0) jika tokenizer mengirim spike pada neuron ini
+            // Berikan arus besar (2.5) jika tokenizer mengirim spike pada neuron ini
             let current = if input_spikes[i] { 2.5 } else { 0.0 };
             // L4 neuron step (ACh memodulasi threshold L4 agar peka terhadap input baru)
             l4_spiked[i] = self.l4_neurons[i].step(current, t, nm.acetylcholine);
@@ -121,10 +121,44 @@ impl CorticalColumn {
             }
         }
 
+        // FITUR 1: GABAergic Lateral Inhibition (Inhibisi Lateral)
+        // Meniru interkoneksi lokal sel GABAergik di neokorteks.
+        // Neuron L2/3 yang menembak pada tick sebelumnya memicu pelepasan GABA,
+        // yang melepaskan arus hambatan negatif pada neuron L2/3 lain di tick saat ini.
+        let prev_l23_spikes = self.l23_neurons.iter().filter(|n| n.has_spiked).count();
+        for j in 0..self.num_l23 {
+            let other_spikes = if self.l23_neurons[j].has_spiked {
+                prev_l23_spikes.saturating_sub(1)
+            } else {
+                prev_l23_spikes
+            };
+            let gaba_current = -0.3 * other_spikes as f32;
+            l23_currents[j] += gaba_current;
+        }
+
         // 3. Jalankan satu langkah neuron L2/3 (Konteks)
         let mut l23_spiked = vec![false; self.num_l23];
         for j in 0..self.num_l23 {
             l23_spiked[j] = self.l23_neurons[j].step(l23_currents[j], t, nm.acetylcholine);
+        }
+
+        // FITUR 3: Homeostatic Plasticity (Intrinsic Plasticity)
+        // Penyesuaian lambat pada ambang batas neuron berdasarkan tingkat aktivitasnya.
+        // Neuron yang baru saja menembak menaikkan threshold dasar agar tidak kelelahan/monopoli,
+        // sedangkan neuron yang pasif perlahan menurunkan threshold agar lebih peka terhadap input berikutnya.
+        for neuron in &mut self.l4_neurons {
+            if neuron.has_spiked {
+                neuron.v_threshold_base = (neuron.v_threshold_base + 0.02).min(2.5);
+            } else {
+                neuron.v_threshold_base = (neuron.v_threshold_base - 0.001).max(0.5);
+            }
+        }
+        for neuron in &mut self.l23_neurons {
+            if neuron.has_spiked {
+                neuron.v_threshold_base = (neuron.v_threshold_base + 0.02).min(2.0);
+            } else {
+                neuron.v_threshold_base = (neuron.v_threshold_base - 0.001).max(0.2);
+            }
         }
 
         // 4. Hitung sinyal Prediksi Top-Down (Feedback) dari L2/3 ke L4
@@ -185,6 +219,39 @@ impl CorticalColumn {
             syn.update_weight(pre_s, post_s, lr_ltp, lr_ltd, nm.dopamine);
         }
 
+        // FITUR 2: Structural Plasticity (Pruning & Sprouting Dinamis)
+        // A. Pruning: Memotong sinapsis dengan bobot sangat kecil karena jarang diperkuat
+        self.feedforward_synapses.retain(|syn| syn.weight > 0.05);
+        self.feedback_synapses.retain(|syn| syn.weight > 0.05);
+
+        // B. Sprouting: Menumbuhkan sinapsis baru dengan bobot minimal jika neuron pre dan post menembak bersamaan,
+        // namun sebelumnya belum terhubung (atau telah terpotong)
+        for pre in 0..self.num_l4 {
+            if l4_spiked[pre] {
+                for post in 0..self.num_l23 {
+                    if l23_spiked[post] {
+                        let exists = self.feedforward_synapses.iter().any(|syn| syn.pre_idx == pre && syn.post_idx == post);
+                        if !exists {
+                            self.feedforward_synapses.push(Synapse::new(pre, post, 0.1));
+                        }
+                    }
+                }
+            }
+        }
+
+        for pre in 0..self.num_l23 {
+            if l23_spiked[pre] {
+                for post in 0..self.num_l4 {
+                    if l4_spiked[post] {
+                        let exists = self.feedback_synapses.iter().any(|syn| syn.pre_idx == pre && syn.post_idx == post);
+                        if !exists {
+                            self.feedback_synapses.push(Synapse::new(pre, post, 0.1));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -221,5 +288,44 @@ mod tests {
                 got: 2
             }
         ));
+    }
+
+    #[test]
+    fn test_neuro_mimetic_features() {
+        let mut column = CorticalColumn::new(2, 2);
+        let mut neuromodulator = Neuromodulator::new(0.9);
+
+        // 1. Verifikasi GABAergic Lateral Inhibition (Inhibisi Lateral)
+        // Paksa neuron L2/3 pertama menembak pada tick sebelumnya
+        column.l23_neurons[0].has_spiked = true;
+        // Step kolom: neuron L2/3 kedua harus terhambat oleh GABA negatif
+        column.step(&[true, false], 1, &mut neuromodulator, 0.05, 0.02).unwrap();
+
+        // 2. Verifikasi Homeostatic Plasticity (Intrinsic Plasticity)
+        // Catat threshold dasar sebelum langkah berikutnya
+        let l4_0_base_init = column.l4_neurons[0].v_threshold_base;
+        let l4_1_base_init = column.l4_neurons[1].v_threshold_base;
+
+        // Step kolom lagi dengan penembakan di L4[0]
+        column.step(&[true, false], 2, &mut neuromodulator, 0.05, 0.02).unwrap();
+
+        // Neuron L4[0] (aktif) threshold dasar naik/turun sesuai status tembakan
+        if column.l4_neurons[0].has_spiked {
+            assert!(column.l4_neurons[0].v_threshold_base > l4_0_base_init);
+        } else {
+            assert!(column.l4_neurons[0].v_threshold_base < l4_0_base_init);
+        }
+        // Neuron L4[1] (pasif) threshold dasar harus turun agar lebih peka
+        assert!(column.l4_neurons[1].v_threshold_base < l4_1_base_init);
+
+        // 3. Verifikasi Structural Plasticity (Pruning)
+        // Set bobot salah satu sinapsis feedforward ke nilai sangat rendah
+        column.feedforward_synapses[0].weight = 0.01;
+        let count_before = column.feedforward_synapses.len();
+        // Lakukan pemrosesan step yang memicu pruning
+        column.step(&[false, false], 3, &mut neuromodulator, 0.05, 0.02).unwrap();
+        let count_after = column.feedforward_synapses.len();
+        // Jumlah sinapsis harus berkurang karena sinapsis berbobot 0.01 telah dipangkas (pruned)
+        assert!(count_after < count_before, "Sinapsis lemah (bobot <= 0.05) harus dipangkas");
     }
 }

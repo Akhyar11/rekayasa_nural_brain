@@ -1,5 +1,6 @@
 use crate::cortical::CorticalColumn;
 use crate::neuromodulator::Neuromodulator;
+use crate::synapse::Synapse;
 use std::collections::VecDeque;
 
 /// Modul Hipokampus (Memori Jangka Pendek & Fast-Binding)
@@ -124,6 +125,52 @@ impl MemoryConsolidator {
                     let pre_s = l23_spikes[syn.pre_idx];
                     let post_s = l4_spikes[syn.post_idx];
                     syn.update_weight(pre_s, post_s, sleep_lr_ltp, sleep_lr_ltd, nm.dopamine);
+                }
+
+                // FITUR 2: Structural Plasticity (Pruning & Sprouting Dinamis) saat Tidur
+                column.feedforward_synapses.retain(|syn| syn.weight > 0.05);
+                column.feedback_synapses.retain(|syn| syn.weight > 0.05);
+
+                for pre in 0..column.num_l4 {
+                    if l4_spikes[pre] {
+                        for post in 0..column.num_l23 {
+                            if l23_spikes[post] {
+                                let exists = column.feedforward_synapses.iter().any(|syn| syn.pre_idx == pre && syn.post_idx == post);
+                                if !exists {
+                                    column.feedforward_synapses.push(Synapse::new(pre, post, 0.1));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for pre in 0..column.num_l23 {
+                    if l23_spikes[pre] {
+                        for post in 0..column.num_l4 {
+                            if l4_spikes[post] {
+                                let exists = column.feedback_synapses.iter().any(|syn| syn.pre_idx == pre && syn.post_idx == post);
+                                if !exists {
+                                    column.feedback_synapses.push(Synapse::new(pre, post, 0.1));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // FITUR 3: Homeostatic Plasticity saat Tidur
+                for neuron in &mut column.l4_neurons {
+                    if neuron.has_spiked {
+                        neuron.v_threshold_base = (neuron.v_threshold_base + 0.02).min(2.5);
+                    } else {
+                        neuron.v_threshold_base = (neuron.v_threshold_base - 0.001).max(0.5);
+                    }
+                }
+                for neuron in &mut column.l23_neurons {
+                    if neuron.has_spiked {
+                        neuron.v_threshold_base = (neuron.v_threshold_base + 0.02).min(2.0);
+                    } else {
+                        neuron.v_threshold_base = (neuron.v_threshold_base - 0.001).max(0.2);
+                    }
                 }
 
                 replay_ticks += 1;

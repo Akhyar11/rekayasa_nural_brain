@@ -470,6 +470,37 @@ impl BrainState {
     }
 
     pub fn activate_node(&mut self, node_id: u64, interaction_index: u64) -> Result<(), BrainError> {
+        if !self.tokenizer.entries.contains_key(&node_id) {
+            let text = if let Some(t) = self.tokenizer.lookup.iter().find(|&(_, &id)| id == node_id).map(|(k, _)| k.clone()) {
+                t
+            } else {
+                format!("<REVIVED_{}>", node_id)
+            };
+            self.tokenizer.lookup.insert(text.clone(), node_id);
+
+            let level = if text.starts_with("<") {
+                super::tokenizer::TokenLevel::Sensor
+            } else if text.chars().count() <= 1 {
+                super::tokenizer::TokenLevel::Sensor
+            } else if text.starts_with("▁") {
+                super::tokenizer::TokenLevel::Word
+            } else {
+                super::tokenizer::TokenLevel::Phrase
+            };
+
+            self.tokenizer.entries.insert(
+                node_id,
+                super::tokenizer::TokenEntry {
+                    node_id,
+                    text,
+                    level,
+                    occurrence_count: 0,
+                    created_at: interaction_index,
+                    last_used_at: interaction_index,
+                },
+            );
+        }
+
         if !self.nodes.contains_key(&node_id) {
             if let Some(entry) = self.tokenizer.get(node_id) {
                 let kind = match entry.level {

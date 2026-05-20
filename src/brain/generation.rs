@@ -55,11 +55,7 @@ impl BrainState {
     ) -> Result<InteractionReport, BrainError> {
         let learning = self.learn_text(input)?;
         self.interaction_count += 1; // Live interaction
-        let response = if let Some(response) = self.recall_trained_response_with_jaccard(&learning.token_ids, gen_config) {
-            response
-        } else {
-            self.generate_response_from_tokens_with_seed(&learning.token_ids, seed, gen_config)?
-        };
+        let response = self.generate_response_from_tokens_with_seed(&learning.token_ids, seed, gen_config)?;
         Ok(InteractionReport { learning, response })
     }
 
@@ -76,9 +72,6 @@ impl BrainState {
     ) -> Result<String, BrainError> {
         let normalized_text = normalize_input(prompt)?;
         let token_ids = self.tokenizer.tokenize(&normalized_text);
-        if let Some(response) = self.recall_trained_response_with_jaccard(&token_ids, gen_config) {
-            return Ok(response);
-        }
         self.generate_response_from_tokens_with_seed(&token_ids, seed, gen_config)
     }
 
@@ -471,36 +464,7 @@ impl BrainState {
         Some(top_p_candidates[0].token_id)
     }
 
-    pub fn recall_trained_response_with_jaccard(
-        &self,
-        prompt_tokens: &[u64],
-        _gen_config: &GenerationConfig,
-    ) -> Option<String> {
-        // If we want exact recall, we can find if there is any prompt in memory whose tokenization matches exactly.
-        let mut best_exact: Option<(String, u64)> = None;
-        for (mem_prompt, responses) in &self.prompt_response_memory {
-            let mem_tokens = self.tokenizer.tokenize(mem_prompt);
-            if mem_tokens == prompt_tokens {
-                if let Some((response, count)) = responses.iter().max_by(
-                    |(left_response, left_count), (right_response, right_count)| {
-                        left_count
-                            .cmp(right_count)
-                            .then_with(|| right_response.len().cmp(&left_response.len()))
-                    },
-                ) {
-                    if best_exact.as_ref().map_or(true, |(_, c)| *count > *c) {
-                        best_exact = Some((response.clone(), *count));
-                    }
-                }
-            }
-        }
-        best_exact.map(|(r, _)| r)
-    }
 
-    pub fn recall_trained_response(&self, prompt: &str) -> Option<String> {
-        let token_ids = self.tokenizer.tokenize(prompt);
-        self.recall_trained_response_with_jaccard(&token_ids, &self.config.generation_config)
-    }
 
     pub fn expand_context_tokens(&self, token_ids: &[u64]) -> Vec<u64> {
         let mut expanded = Vec::new();

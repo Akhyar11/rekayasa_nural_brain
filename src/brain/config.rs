@@ -53,6 +53,10 @@ impl GenerationConfig {
     }
 }
 
+fn default_dynamic_vocab() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BrainConfig {
     pub word_promotion_threshold: u64,
@@ -67,7 +71,7 @@ pub struct BrainConfig {
     pub max_recent_utterances: usize,
     #[serde(default)]
     pub generation_config: GenerationConfig,
-    #[serde(default)]
+    #[serde(default = "default_dynamic_vocab")]
     pub dynamic_vocab: bool,
 }
 
@@ -85,7 +89,7 @@ impl Default for BrainConfig {
             response_token_limit: 24,
             max_recent_utterances: 128,
             generation_config: GenerationConfig::default(),
-            dynamic_vocab: false,
+            dynamic_vocab: true,
         }
     }
 }

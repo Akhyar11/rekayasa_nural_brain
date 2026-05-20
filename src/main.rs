@@ -488,6 +488,10 @@ where
             config.generation_config.randomness_seed = Some(parse_u64(&next_value(args, "--seed")?, "--seed")?);
             Ok(true)
         }
+        "--dynamic-vocab" => {
+            config.dynamic_vocab = parse_bool(&next_value(args, "--dynamic-vocab")?, "--dynamic-vocab")?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -885,6 +889,12 @@ fn parse_f32(value: &str, flag: &str) -> Result<f32, String> {
         .map_err(|_| format!("{flag} harus berupa angka desimal yang valid"))
 }
 
+fn parse_bool(value: &str, flag: &str) -> Result<bool, String> {
+    value
+        .parse::<bool>()
+        .map_err(|_| format!("{flag} harus berupa boolean (true atau false)"))
+}
+
 fn render_dashboard(snapshot: &ActiveTickSnapshot, tokenizer: &SpikingTokenizer, ansi: bool) {
     if ansi {
         print!("\x1b[2J\x1b[H");
@@ -1266,17 +1276,15 @@ impl TrainReporter {
             state.remembered_pairs
         ));
         self.println(&format!(
-            "cumulative          : examples {} | prompt tok {} | response tok {} | new sensor {} | new word {} | new phrase {} | new context {} | new edges {} | pruned edges {} | pruned context {}",
+            "cumulative          : examples {} | prompt tok {} | response tok {} | sensor {} | word {} | phrase {} | context {} | edges {}",
             summary.examples,
             summary.prompt_tokens,
             summary.response_tokens,
-            summary.new_sensor_tokens,
-            summary.new_word_tokens,
-            summary.new_phrase_tokens,
-            summary.new_context_nodes,
-            summary.new_edges,
-            summary.pruned_edges,
-            summary.pruned_context_nodes
+            state.sensor_token_count,
+            state.word_token_count,
+            state.phrase_token_count,
+            state.context_node_count,
+            state.edge_count
         ));
 
         if self.verbose {
@@ -1628,6 +1636,7 @@ Options:
   --min-edge-strength <value>     Ambang hapus edge lemah
   --response-token-limit <n>      Batas token balasan yang digenerasi
   --memory-window <n>             Jumlah input yang diingat
+  --dynamic-vocab <true|false>    Kembangkan vocabulary secara dinamis (default: true)
 
 Examples:
   cargo run -- chat
@@ -1658,6 +1667,7 @@ Options:
   --min-edge-strength <value>     Ambang hapus edge lemah
   --response-token-limit <n>      Batas token balasan yang digenerasi
   --memory-window <n>             Jumlah input yang diingat
+  --dynamic-vocab <true|false>    Kembangkan vocabulary secara dinamis (default: true)
 
 Format file:
   JSON PersonaChat atau prompt<TAB>response
