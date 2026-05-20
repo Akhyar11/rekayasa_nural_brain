@@ -287,6 +287,7 @@ impl BrainState {
                 last_activated_at: interaction_index,
                 salience: 0.0,
                 composition,
+                masked: false,
             },
         );
         self.tokenizer
@@ -311,6 +312,7 @@ impl BrainState {
                 last_activated_at: interaction_index,
                 salience: 0.0,
                 composition: token_ids.to_vec(),
+                masked: false,
             },
         );
         Ok(node_id)
@@ -365,11 +367,13 @@ impl BrainState {
                             node_id: None,
                             last_activated_at: interaction_index,
                             label: label.clone(),
+                            masked: false,
                         }
                     });
                     pattern.occurrence_count += 1;
                     *pattern.predicted_counts.entry(predicted).or_insert(0) += 1;
                     pattern.last_activated_at = interaction_index;
+                    pattern.masked = false;
                     if pattern.node_id.is_none()
                         && pattern.occurrence_count >= self.config.context_promotion_threshold
                     {
@@ -455,8 +459,10 @@ impl BrainState {
                 strength: 0.0,
                 activation_count: 0,
                 last_activated_at: interaction_index,
+                masked: false,
             }
         });
+        edge.masked = false;
  
         // Kaidah asintotik: pertumbuhan hubungan non-linear (asymptotic/saturation)
         // dW = learning_rate * amount * (1.0 - W)
@@ -497,6 +503,7 @@ impl BrainState {
                     occurrence_count: 0,
                     created_at: interaction_index,
                     last_used_at: interaction_index,
+                    masked: false,
                 },
             );
         }
@@ -518,6 +525,7 @@ impl BrainState {
                         last_activated_at: 0,
                         salience: 0.0,
                         composition: Vec::new(),
+                        masked: false,
                     },
                 );
             } else {
@@ -531,6 +539,7 @@ impl BrainState {
         node.activation_count += 1;
         node.last_activated_at = interaction_index;
         node.salience = (node.salience + 0.2).clamp(0.0, 1.0);
+        node.masked = false;
         Ok(())
     }
 
@@ -568,8 +577,7 @@ impl BrainState {
             self.tokenizer.register_token(id, &concept_name_norm, TokenLevel::Phrase, interaction_index);
             id
         };
-        
-        let concept_node = self.nodes.entry(concept_token_id).or_insert(BrainNode {
+               let concept_node = self.nodes.entry(concept_token_id).or_insert(BrainNode {
             id: concept_token_id,
             label: concept_name_norm.clone(),
             kind: NodeKind::Concept,
@@ -577,8 +585,10 @@ impl BrainState {
             last_activated_at: interaction_index,
             salience: 0.0,
             composition: Vec::new(),
+            masked: false,
         });
         concept_node.kind = NodeKind::Concept; // force it to be Concept kind if it wasn't
+        concept_node.masked = false;
  
         // 2. Register each member term and create a ConceptMember edge from the member to the concept
         for term in member_terms {
@@ -595,7 +605,7 @@ impl BrainState {
             };
             
             // Ensure the member node exists
-            self.nodes.entry(member_token_id).or_insert(BrainNode {
+            let member_node = self.nodes.entry(member_token_id).or_insert(BrainNode {
                 id: member_token_id,
                 label: term_norm.clone(),
                 kind: NodeKind::Lexical,
@@ -603,18 +613,22 @@ impl BrainState {
                 last_activated_at: interaction_index,
                 salience: 0.0,
                 composition: Vec::new(),
+                masked: false,
             });
-
+            member_node.masked = false;
+ 
             // Create EdgeKind::ConceptMember from member to concept
             let edge_key = edge_key(member_token_id, concept_token_id, EdgeKind::ConceptMember);
-            self.edges.entry(edge_key).or_insert(BrainEdge {
+            let edge = self.edges.entry(edge_key).or_insert(BrainEdge {
                 source: member_token_id,
                 target: concept_token_id,
                 kind: EdgeKind::ConceptMember,
                 strength: 1.0, // strong association by default
                 activation_count: 1,
                 last_activated_at: interaction_index,
+                masked: false,
             });
+            edge.masked = false;
         }
         
         Ok(())

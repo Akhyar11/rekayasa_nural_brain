@@ -36,6 +36,8 @@ pub struct BrainNode {
     pub last_activated_at: u64,
     pub salience: f32,
     pub composition: Vec<u64>,
+    #[serde(default)]
+    pub masked: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,6 +48,8 @@ pub struct BrainEdge {
     pub strength: f32,
     pub activation_count: u64,
     pub last_activated_at: u64,
+    #[serde(default)]
+    pub masked: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +60,8 @@ pub struct ContextPattern {
     pub node_id: Option<u64>,
     pub last_activated_at: u64,
     pub label: String,
+    #[serde(default)]
+    pub masked: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,6 +201,7 @@ impl BrainState {
                         last_activated_at: 0,
                         salience: 0.0,
                         composition: Vec::new(),
+                        masked: false,
                     },
                 );
             }

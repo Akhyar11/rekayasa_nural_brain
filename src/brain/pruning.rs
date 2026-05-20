@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use super::state::{BrainState, EdgeKind, NodeKind};
 use super::tokenizer::TokenLevel;
 
@@ -7,9 +6,9 @@ impl BrainState {
         let stale_after = self.config.prune_interval.saturating_mul(4);
 
         // 1. Kumpulkan token (kata/frasa) yang sudah usang
-        let mut tokens_to_remove = Vec::new();
+        let mut tokens_to_mask = Vec::new();
         for (&node_id, entry) in &self.tokenizer.entries {
-            // Jangan pernah hapus token khusus sistem (diawali <) atau sensor dasar (huruf/angka tunggal)
+            // Jangan pernah hapus/mask token khusus sistem (diawali <) atau sensor dasar (huruf/angka tunggal)
             if entry.text.starts_with("<") || entry.level == TokenLevel::Sensor {
                 continue;
             }
@@ -17,29 +16,29 @@ impl BrainState {
             // Cek usia keaktifan token
             let age = interaction_index.saturating_sub(entry.last_used_at);
             if age >= stale_after {
-                tokens_to_remove.push((node_id, entry.text.clone()));
+                tokens_to_mask.push(node_id);
             }
         }
 
-        // Hapus token yang usang dari tokenizer dan node graf
-        for (node_id, text) in &tokens_to_remove {
-            self.tokenizer.entries.remove(node_id);
-            self.tokenizer.lookup.remove(text);
-            self.nodes.remove(node_id);
+        // Mask token yang usang di tokenizer dan graf node
+        let mut total_tokens_masked = 0;
+        for &node_id in &tokens_to_mask {
+            if let Some(entry) = self.tokenizer.entries.get_mut(&node_id) {
+                if !entry.masked {
+                    entry.masked = true;
+                    total_tokens_masked += 1;
+                }
+            }
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                node.masked = true;
+            }
         }
 
-        // Rebuild pencarian Trie BPE jika ada kosakata yang terhapus
-        if !tokens_to_remove.is_empty() {
-            self.tokenizer.rebuild_trie();
-        }
-
-        // 2. Tentukan edges yang akan dihapus
-        let mut edges_to_remove = Vec::new();
-        for (key, edge) in &mut self.edges {
-            // Edges yang terhubung ke token yang telah dihapus harus ikut dihapus (cascading pruning)
-            let is_connected_to_pruned_token = tokens_to_remove
-                .iter()
-                .any(|(id, _)| edge.source == *id || edge.target == *id);
+        // 2. Tentukan edges yang akan di-mask
+        let mut edges_masked_count = 0;
+        for edge in self.edges.values_mut() {
+            // Edges yang terhubung ke token yang telah di-mask harus ikut di-mask (cascading masking)
+            let is_connected_to_masked_token = tokens_to_mask.contains(&edge.source) || tokens_to_mask.contains(&edge.target);
 
             let age = interaction_index.saturating_sub(edge.last_activated_at);
             if edge.kind != EdgeKind::ConceptMember && age > 1 {
@@ -50,50 +49,33 @@ impl BrainState {
                 && edge.strength < self.config.min_edge_strength
                 && age >= stale_after;
 
-            if is_connected_to_pruned_token || is_stale_weak {
-                edges_to_remove.push(key.clone());
+            if (is_connected_to_masked_token || is_stale_weak) && !edge.masked {
+                edge.masked = true;
+                edges_masked_count += 1;
             }
         }
 
-        for key in &edges_to_remove {
-            self.edges.remove(key);
-        }
-
-        // 3. Tentukan Context Nodes yang akan dihapus
-        let active_nodes: BTreeSet<u64> = self
-            .edges
-            .values()
-            .flat_map(|edge| [edge.source, edge.target])
-            .collect();
-        let protected_token_nodes: BTreeSet<u64> = self.tokenizer.entries.keys().copied().collect();
-        let mut context_nodes_to_remove = Vec::new();
-
-        for (node_id, node) in &self.nodes {
+        // 3. Tentukan Context Patterns dan Nodes yang akan di-mask
+        let mut context_nodes_masked_count = 0;
+        for (_, node) in &mut self.nodes {
             if node.kind != NodeKind::Context {
                 continue;
             }
-            if protected_token_nodes.contains(node_id) {
-                continue;
-            }
             let age = interaction_index.saturating_sub(node.last_activated_at);
-            if !active_nodes.contains(node_id) && age >= stale_after {
-                context_nodes_to_remove.push(*node_id);
+            if age >= stale_after && !node.masked {
+                node.masked = true;
+                context_nodes_masked_count += 1;
             }
-        }
-
-        for node_id in &context_nodes_to_remove {
-            self.nodes.remove(node_id);
         }
 
         for pattern in self.context_patterns.values_mut() {
-            if let Some(node_id) = pattern.node_id
-                && context_nodes_to_remove.contains(&node_id)
-            {
-                pattern.node_id = None;
+            let age = interaction_index.saturating_sub(pattern.last_activated_at);
+            if age >= stale_after && !pattern.masked {
+                pattern.masked = true;
             }
         }
 
-        let total_nodes_removed = context_nodes_to_remove.len() + tokens_to_remove.len();
-        (edges_to_remove.len(), total_nodes_removed)
+        let total_nodes_masked = context_nodes_masked_count + total_tokens_masked;
+        (edges_masked_count, total_nodes_masked)
     }
 }

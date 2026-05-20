@@ -43,6 +43,8 @@ pub struct TokenEntry {
     pub occurrence_count: u64,
     pub created_at: u64,
     pub last_used_at: u64,
+    #[serde(default)]
+    pub masked: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -243,6 +245,7 @@ impl AdaptiveTokenizer {
                 occurrence_count: 0,
                 created_at: interaction_index,
                 last_used_at: interaction_index,
+                masked: false,
             },
         );
         self.trie.insert(&key, node_id, level);
@@ -276,6 +279,7 @@ impl AdaptiveTokenizer {
                     occurrence_count: 0,
                     created_at: interaction_index,
                     last_used_at: interaction_index,
+                    masked: false,
                 },
             );
         }
@@ -286,6 +290,7 @@ impl AdaptiveTokenizer {
             .ok_or(BrainError::MissingToken(node_id))?;
         token.occurrence_count += 1;
         token.last_used_at = interaction_index;
+        token.masked = false;
         Ok(())
     }
 
@@ -491,6 +496,7 @@ impl AdaptiveTokenizer {
                     occurrence_count: 0,
                     created_at: interaction_index,
                     last_used_at: interaction_index,
+                    masked: false,
                 },
             );
         }

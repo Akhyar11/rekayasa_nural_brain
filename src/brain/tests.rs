@@ -398,11 +398,11 @@ mod tests {
         // Run pruning at index 10
         let (_pruned_edges, pruned_nodes) = brain.prune_graph(10);
 
-        // Verify the token is gone from tokenizer and graph nodes!
-        assert!(!brain.tokenizer.entries.contains_key(&token_id), "Token should be pruned from tokenizer");
-        assert!(!brain.tokenizer.lookup.contains_key("▁kopi"), "Token lookup should be removed");
-        assert!(!brain.nodes.contains_key(&token_id), "Token node should be pruned from graph");
-        assert!(pruned_nodes >= 1, "Should report at least 1 node pruned");
+        // Verify the token is masked in tokenizer and graph nodes!
+        assert!(brain.tokenizer.entries.get(&token_id).map_or(false, |e| e.masked), "Token should be masked in tokenizer");
+        assert!(brain.tokenizer.lookup.contains_key("▁kopi"), "Token lookup should still exist (memory/ram consequence)");
+        assert!(brain.nodes.get(&token_id).map_or(false, |n| n.masked), "Token node should be masked in graph");
+        assert!(pruned_nodes >= 1, "Should report at least 1 node masked");
     }
 
     #[test]

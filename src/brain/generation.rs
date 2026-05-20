@@ -247,11 +247,18 @@ impl BrainState {
             let w = (index + 1) as f32;
             let mut local = Vec::new();
             if let Some(pattern) = self.context_patterns.get(&context_key(prefix)) {
-                let total_predictions: u64 = pattern.predicted_counts.values().sum();
-                if total_predictions > 0 {
-                    for (&token_id, &count) in &pattern.predicted_counts {
-                        let score = (count as f32 / total_predictions as f32) * w;
-                        local.push((token_id, score, w));
+                if !pattern.masked {
+                    let total_predictions: u64 = pattern.predicted_counts.values().sum();
+                    if total_predictions > 0 {
+                        for (&token_id, &count) in &pattern.predicted_counts {
+                            if let Some(tok) = self.tokenizer.entries.get(&token_id) {
+                                if tok.masked {
+                                    continue;
+                                }
+                            }
+                            let score = (count as f32 / total_predictions as f32) * w;
+                            local.push((token_id, score, w));
+                        }
                     }
                 }
             }
@@ -259,7 +266,7 @@ impl BrainState {
         }).collect();
 
         // 4. Transitions in parallel (including relational traversal)
-        let edge_candidates: Vec<&BrainEdge> = self.edges.values().collect();
+        let edge_candidates: Vec<&BrainEdge> = self.edges.values().filter(|edge| !edge.masked).collect();
         let last_token = context.last().copied();
         let transition_results: Vec<(u64, f32)> = if let Some(last_tok) = last_token {
             // Find concepts last_tok belongs to
@@ -331,6 +338,12 @@ impl BrainState {
 
         let mut list = Vec::new();
         for (token_id, entry) in candidate_map {
+            if let Some(tok) = self.tokenizer.entries.get(&token_id) {
+                if tok.masked {
+                    continue;
+                }
+            }
+
             let ctx_score = if entry.context_weight_sum > 0.0 {
                 entry.context_score / entry.context_weight_sum
             } else {
