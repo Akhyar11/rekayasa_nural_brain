@@ -37,6 +37,7 @@ impl BrainState {
             }
             state.config.validate()?;
             state.tokenizer.rebuild_trie();
+            state.rebuild_inverted_index();
             Ok(state)
         } else {
             match bincode::serde::decode_from_slice::<Self, _>(&bytes, bincode::config::standard()) {
@@ -54,6 +55,7 @@ impl BrainState {
                     state.config.validate()?;
                     // Rebuild the trie from deserialized entries!
                     state.tokenizer.rebuild_trie();
+                    state.rebuild_inverted_index();
                     Ok(state)
                 }
                 Err(current_error) => {
@@ -69,6 +71,7 @@ impl BrainState {
                             let mut state: Self = legacy.into();
                             state.config.validate()?;
                             state.tokenizer.rebuild_trie();
+                            state.rebuild_inverted_index();
                             Ok(state)
                         }
                         Err(_) => {
@@ -84,6 +87,7 @@ impl BrainState {
                                     let mut state: Self = legacy.into();
                                     state.config.validate()?;
                                     state.tokenizer.rebuild_trie();
+                                    state.rebuild_inverted_index();
                                     Ok(state)
                                 }
                                 Err(_) => Err(BrainError::Decode(current_error)),

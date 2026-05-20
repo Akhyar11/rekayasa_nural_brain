@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use super::state::{BrainState, NodeKind};
+use super::state::{BrainState, EdgeKind, NodeKind};
 
 impl BrainState {
     pub fn prune_graph(&mut self, interaction_index: u64) -> (usize, usize) {
@@ -7,10 +7,11 @@ impl BrainState {
         let mut edges_to_remove = Vec::new();
         for (key, edge) in &mut self.edges {
             let age = interaction_index.saturating_sub(edge.last_activated_at);
-            if age > 1 {
+            if edge.kind != EdgeKind::ConceptMember && age > 1 {
                 edge.strength *= self.config.edge_decay;
             }
-            if edge.strength < self.config.min_edge_strength
+            if edge.kind != EdgeKind::ConceptMember
+                && edge.strength < self.config.min_edge_strength
                 && age >= stale_after
                 && edge.activation_count <= 1
             {

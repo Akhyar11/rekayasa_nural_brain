@@ -109,7 +109,37 @@ impl BrainState {
         let mut rng = SimpleRng::new(seed);
 
         for _ in 0..self.config.response_token_limit {
-            let candidates = self.next_token_distribution(&context, prompt_token_ids, &generated, gen_config);
+            let mut candidates = self.next_token_distribution(&context, prompt_token_ids, &generated, gen_config);
+
+            // Trigram blocking: block any token that would repeat a trigram already present in `generated`
+            if generated.len() >= 2 {
+                let penultimate = generated[generated.len() - 2];
+                let last = generated[generated.len() - 1];
+                let mut blocked_tokens = BTreeSet::new();
+                for window in generated.windows(3) {
+                    if window[0] == penultimate && window[1] == last {
+                        blocked_tokens.insert(window[2]);
+                    }
+                }
+                if !blocked_tokens.is_empty() {
+                    let filtered: Vec<TokenCandidate> = candidates
+                        .iter()
+                        .filter(|c| !blocked_tokens.contains(&c.token_id))
+                        .cloned()
+                        .collect();
+                    if !filtered.is_empty() {
+                        candidates = filtered;
+                        // Re-normalize probabilities
+                        let total_p: f32 = candidates.iter().map(|c| c.probability).sum();
+                        if total_p > 0.0 {
+                            for c in &mut candidates {
+                                c.probability /= total_p;
+                            }
+                        }
+                    }
+                }
+            }
+
             if candidates.is_empty() {
                 break;
             }
@@ -166,23 +196,35 @@ impl BrainState {
         let prompt_tokens = prompt.to_vec();
         let g_len = generated.len();
 
-        // 1. Soft recall in parallel
-        let memory_candidates: Vec<(&String, &BTreeMap<String, u64>)> = self.prompt_response_memory.iter().collect();
-        let soft_recall_results: Vec<(u64, f32)> = memory_candidates.par_iter().filter_map(|(key_prompt, responses)| {
-            let key_tokens = self.tokenizer.tokenize(key_prompt);
-            let sim = jaccard_similarity(&prompt_tokens, &key_tokens);
-            if sim >= 0.25 {
-                if let Some((response_text, _)) = responses.iter().max_by(|(left_r, left_c), (right_r, right_c)| {
-                    left_c.cmp(right_c).then_with(|| right_r.len().cmp(&left_r.len()))
-                }) {
-                    let response_tokens = self.tokenizer.tokenize(response_text);
-                    if g_len < response_tokens.len() {
-                        return Some((response_tokens[g_len], sim));
+        // 1. Soft recall via Inverted Index
+        let mut candidate_prompts = BTreeSet::new();
+        for &token_id in &prompt_tokens {
+            if let Some(prompts) = self.prompt_inverted_index.get(&token_id) {
+                candidate_prompts.extend(prompts);
+            }
+        }
+
+        let soft_recall_results: Vec<(u64, f32)> = candidate_prompts
+            .into_iter()
+            .par_bridge()
+            .filter_map(|key_prompt| {
+                if let Some(responses) = self.prompt_response_memory.get(key_prompt.as_str()) {
+                    let key_tokens = self.tokenizer.tokenize(&key_prompt);
+                    let sim = jaccard_similarity(&prompt_tokens, &key_tokens);
+                    if sim >= 0.25 {
+                        if let Some((response_text, _)) = responses.iter().max_by(|(left_r, left_c), (right_r, right_c)| {
+                            left_c.cmp(right_c).then_with(|| right_r.len().cmp(&left_r.len()))
+                        }) {
+                            let response_tokens = self.tokenizer.tokenize(response_text);
+                            if g_len < response_tokens.len() {
+                                return Some((response_tokens[g_len], sim));
+                            }
+                        }
                     }
                 }
-            }
-            None
-        }).collect();
+                None
+            })
+            .collect();
 
         // 2. Recent memory in parallel
         let utterances: Vec<&UtteranceMemory> = self.recent_utterances.iter().collect();
@@ -223,13 +265,38 @@ impl BrainState {
             local
         }).collect();
 
-        // 4. Transitions in parallel
+        // 4. Transitions in parallel (including relational traversal)
         let edge_candidates: Vec<&BrainEdge> = self.edges.values().collect();
         let last_token = context.last().copied();
         let transition_results: Vec<(u64, f32)> = if let Some(last_tok) = last_token {
+            // Find concepts last_tok belongs to
+            let mut concepts = Vec::new();
+            for edge in &edge_candidates {
+                if edge.kind == EdgeKind::ConceptMember && edge.source == last_tok {
+                    concepts.push(edge.target);
+                }
+            }
+
+            // Find synonyms (other members of those concepts)
+            let mut synonyms = BTreeSet::new();
+            for concept_id in concepts {
+                for edge in &edge_candidates {
+                    if edge.kind == EdgeKind::ConceptMember && edge.target == concept_id && edge.source != last_tok {
+                        synonyms.insert(edge.source);
+                    }
+                }
+            }
+
             edge_candidates.par_iter().filter_map(|edge| {
-                if edge.kind == EdgeKind::Transition && edge.source == last_tok {
-                    Some((edge.target, edge.strength.clamp(0.0, 1.0)))
+                if edge.kind == EdgeKind::Transition {
+                    if edge.source == last_tok {
+                        Some((edge.target, edge.strength.clamp(0.0, 1.0)))
+                    } else if synonyms.contains(&edge.source) {
+                        // Relational traversal: apply relational decay factor (0.3)
+                        Some((edge.target, (edge.strength * 0.3).clamp(0.0, 1.0)))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }

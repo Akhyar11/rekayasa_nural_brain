@@ -447,7 +447,11 @@ impl BrainState {
             activation_count: 0,
             last_activated_at: interaction_index,
         });
-        edge.strength = (edge.strength + amount).clamp(0.0, 1.0);
+        // Kaidah asintotik: pertumbuhan hubungan non-linear (asymptotic/saturation)
+        // dW = learning_rate * amount * (1.0 - W)
+        let learning_rate = 0.4;
+        let delta = learning_rate * amount * (1.0 - edge.strength);
+        edge.strength = (edge.strength + delta).clamp(0.0, 1.0);
         edge.activation_count += 1;
         edge.last_activated_at = interaction_index;
     }
@@ -475,6 +479,78 @@ impl BrainState {
             .entry(prompt.to_string())
             .or_default();
         *responses.entry(response.to_string()).or_insert(0) += 1;
+
+        // Update the prompt_inverted_index for fast recall lookup
+        let tokens = self.tokenizer.tokenize(prompt);
+        for token_id in tokens {
+            self.prompt_inverted_index
+                .entry(token_id)
+                .or_default()
+                .insert(prompt.to_string());
+        }
+    }
+
+    pub fn associate_concept(&mut self, concept_name: &str, member_terms: &[String], interaction_index: u64) -> Result<(), BrainError> {
+        let concept_name_norm = normalize_input(concept_name)?;
+        
+        // 1. Get or register the concept node
+        let concept_token_id = if let Some(&id) = self.tokenizer.lookup.get(&concept_name_norm) {
+            id
+        } else {
+            let id = self.allocate_node_id();
+            self.tokenizer.register_token(id, &concept_name_norm, TokenLevel::Phrase, interaction_index);
+            id
+        };
+        
+        let concept_node = self.nodes.entry(concept_token_id).or_insert(BrainNode {
+            id: concept_token_id,
+            label: concept_name_norm.clone(),
+            kind: NodeKind::Concept,
+            activation_count: 0,
+            last_activated_at: interaction_index,
+            salience: 0.0,
+            composition: Vec::new(),
+        });
+        concept_node.kind = NodeKind::Concept; // force it to be Concept kind if it wasn't
+
+        // 2. Register each member term and create a ConceptMember edge from the member to the concept
+        for term in member_terms {
+            let term_norm = normalize_input(term)?;
+            if term_norm.is_empty() {
+                continue;
+            }
+            let member_token_id = if let Some(&id) = self.tokenizer.lookup.get(&term_norm) {
+                id
+            } else {
+                let id = self.allocate_node_id();
+                self.tokenizer.register_token(id, &term_norm, TokenLevel::Word, interaction_index);
+                id
+            };
+            
+            // Ensure the member node exists
+            self.nodes.entry(member_token_id).or_insert(BrainNode {
+                id: member_token_id,
+                label: term_norm.clone(),
+                kind: NodeKind::Lexical,
+                activation_count: 0,
+                last_activated_at: interaction_index,
+                salience: 0.0,
+                composition: Vec::new(),
+            });
+
+            // Create EdgeKind::ConceptMember from member to concept
+            let edge_key = edge_key(member_token_id, concept_token_id, EdgeKind::ConceptMember);
+            self.edges.entry(edge_key).or_insert(BrainEdge {
+                source: member_token_id,
+                target: concept_token_id,
+                kind: EdgeKind::ConceptMember,
+                strength: 1.0, // strong association by default
+                activation_count: 1,
+                last_activated_at: interaction_index,
+            });
+        }
+        
+        Ok(())
     }
 }
 

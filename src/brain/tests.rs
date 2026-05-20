@@ -314,4 +314,43 @@ mod tests {
         let ent = entropy(&probs);
         assert!((ent - 0.69314718).abs() < 1e-5);
     }
+
+    #[test]
+    fn trigram_blocking_prevents_loops() {
+        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+        // Latih berulang kali untuk memperkuat transisi suka -> kopi -> hitam
+        for _ in 0..5 {
+            brain.learn_text("suka kopi hitam suka kopi hitam").expect("learning should pass");
+        }
+        
+        let response = brain.generate_response("suka kopi").expect("generation should pass");
+        
+        // Karena ada trigram blocking, perulangan beruntun 3x suka kopi hitam harus terputus
+        assert!(!response.contains("suka kopi hitam suka kopi hitam suka kopi hitam"), 
+            "Response should block consecutive loop, but got: {}", response);
+    }
+
+    #[test]
+    fn concept_relational_traversal_enables_soft_reasoning() {
+        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+        
+        // 1. Latih transisi "teh manis" beberapa kali agar dipromosikan jadi kata
+        for _ in 0..5 {
+            brain.learn_text("teh manis").expect("learning should pass");
+        }
+        
+        // 2. Buat konsep "minuman" yang mengelompokkan "kopi" dan "teh"
+        brain.associate_concept(
+            "minuman",
+            &["kopi".to_string(), "teh".to_string()],
+            1
+        ).expect("associating concept should pass");
+        
+        // 3. Generate respon untuk "kopi".
+        // Karena "kopi" dan "teh" adalah anggota konsep "minuman",
+        // relational traversal akan memungkinkan transisi ke "manis" via "teh"!
+        let response = brain.generate_response("kopi").expect("generation should pass");
+        
+        assert!(response.contains("manis"), "Response should traverse via concept node to 'manis', but got: {}", response);
+    }
 }

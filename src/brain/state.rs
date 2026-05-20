@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use super::config::BrainConfig;
@@ -16,6 +16,7 @@ pub enum NodeKind {
     Lexical,
     Phrase,
     Context,
+    Concept,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,6 +24,7 @@ pub enum EdgeKind {
     Transition,
     ContextInput,
     ContextPrediction,
+    ConceptMember,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,6 +79,8 @@ pub struct BrainState {
     pub context_patterns: BTreeMap<String, ContextPattern>,
     pub prompt_response_memory: BTreeMap<String, BTreeMap<String, u64>>,
     pub recent_utterances: VecDeque<UtteranceMemory>,
+    #[serde(skip, default)]
+    pub prompt_inverted_index: BTreeMap<u64, BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,6 +125,7 @@ impl From<LegacyBrainStateV2> for BrainState {
             context_patterns: legacy.context_patterns,
             prompt_response_memory: legacy.prompt_response_memory,
             recent_utterances: legacy.recent_utterances,
+            prompt_inverted_index: BTreeMap::new(),
         }
     }
 }
@@ -140,6 +145,7 @@ impl From<LegacyBrainStateV1> for BrainState {
             context_patterns: legacy.context_patterns,
             prompt_response_memory: BTreeMap::new(),
             recent_utterances: legacy.recent_utterances,
+            prompt_inverted_index: BTreeMap::new(),
         }
     }
 }
@@ -160,7 +166,19 @@ impl BrainState {
             context_patterns: BTreeMap::new(),
             prompt_response_memory: BTreeMap::new(),
             recent_utterances: VecDeque::new(),
+            prompt_inverted_index: BTreeMap::new(),
         })
+    }
+
+    pub fn rebuild_inverted_index(&mut self) {
+        let mut index: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+        for prompt in self.prompt_response_memory.keys() {
+            let tokens = self.tokenizer.tokenize(prompt);
+            for token_id in tokens {
+                index.entry(token_id).or_default().insert(prompt.clone());
+            }
+        }
+        self.prompt_inverted_index = index;
     }
 }
 

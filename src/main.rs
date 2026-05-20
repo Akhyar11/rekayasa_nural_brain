@@ -1445,6 +1445,7 @@ fn edge_kind_label(kind: rekayasa_nural_brain::brain::EdgeKind) -> &'static str 
         rekayasa_nural_brain::brain::EdgeKind::Transition => "transition",
         rekayasa_nural_brain::brain::EdgeKind::ContextInput => "context-input",
         rekayasa_nural_brain::brain::EdgeKind::ContextPrediction => "context-prediction",
+        rekayasa_nural_brain::brain::EdgeKind::ConceptMember => "concept-member",
     }
 }
 
