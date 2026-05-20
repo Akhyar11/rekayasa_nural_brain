@@ -191,8 +191,19 @@ impl AdaptiveTokenizer {
         self.entries.len()
     }
 
+    pub fn get_token_id(&self, surface: &str) -> Option<u64> {
+        if let Some(&id) = self.lookup.get(surface) {
+            return Some(id);
+        }
+        let word_key = format!("{}{}", WORD_BOUNDARY, surface);
+        if let Some(&id) = self.lookup.get(&word_key) {
+            return Some(id);
+        }
+        None
+    }
+
     pub fn contains(&self, surface: &str) -> bool {
-        self.lookup.contains_key(surface)
+        self.get_token_id(surface).is_some()
     }
 
     pub fn get(&self, node_id: u64) -> Option<&TokenEntry> {

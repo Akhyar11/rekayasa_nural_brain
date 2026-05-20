@@ -156,9 +156,8 @@ impl BrainState {
             self.ensure_sensor_tokens(&normalized_text, step_index, &mut report)?;
             self.promote_word_tokens(&normalized_text, step_index, &mut report)?;
             self.promote_phrase_tokens(&normalized_text, step_index, &mut report)?;
+            self.compress_long_sequences(&normalized_text, step_index, &mut report)?;
         }
-
-        self.compress_long_sequences(&normalized_text, step_index, &mut report)?;
 
         let token_ids = self.tokenizer.tokenize(&normalized_text);
         report.token_count = token_ids.len();
@@ -264,7 +263,7 @@ impl BrainState {
         level: TokenLevel,
         interaction_index: u64,
     ) -> Result<u64, BrainError> {
-        if let Some(existing) = self.tokenizer.lookup.get(surface).copied() {
+        if let Some(existing) = self.tokenizer.get_token_id(surface) {
             return Ok(existing);
         }
 
@@ -321,14 +320,15 @@ impl BrainState {
         let mut updates = 0;
         for window in token_ids.windows(2) {
             if let [source, target] = window {
-                self.strengthen_edge(
+                if self.strengthen_edge(
                     *source,
                     *target,
                     EdgeKind::Transition,
                     interaction_index,
                     1.0,
-                );
-                updates += 1;
+                ) {
+                    updates += 1;
+                }
             }
         }
         updates
@@ -400,23 +400,25 @@ impl BrainState {
         for (prefix, node_id, predicted) in pending_links {
             self.activate_node(node_id, interaction_index)?;
             for source in &prefix {
-                self.strengthen_edge(
+                if self.strengthen_edge(
                     *source,
                     node_id,
                     EdgeKind::ContextInput,
                     interaction_index,
                     0.35,
-                );
-                updates += 1;
+                ) {
+                    updates += 1;
+                }
             }
-            self.strengthen_edge(
+            if self.strengthen_edge(
                 node_id,
                 predicted,
                 EdgeKind::ContextPrediction,
                 interaction_index,
                 0.8,
-            );
-            updates += 1;
+            ) {
+                updates += 1;
+            }
         }
 
         Ok(updates)
@@ -441,16 +443,21 @@ impl BrainState {
         kind: EdgeKind,
         interaction_index: u64,
         amount: f32,
-    ) {
+    ) -> bool {
         let key = edge_key(source, target, kind);
-        let edge = self.edges.entry(key).or_insert(BrainEdge {
-            source,
-            target,
-            kind,
-            strength: 0.0,
-            activation_count: 0,
-            last_activated_at: interaction_index,
+        let mut is_new = false;
+        let edge = self.edges.entry(key).or_insert_with(|| {
+            is_new = true;
+            BrainEdge {
+                source,
+                target,
+                kind,
+                strength: 0.0,
+                activation_count: 0,
+                last_activated_at: interaction_index,
+            }
         });
+ 
         // Kaidah asintotik: pertumbuhan hubungan non-linear (asymptotic/saturation)
         // dW = learning_rate * amount * (1.0 - W)
         let learning_rate = 0.4;
@@ -458,6 +465,8 @@ impl BrainState {
         edge.strength = (edge.strength + delta).clamp(0.0, 1.0);
         edge.activation_count += 1;
         edge.last_activated_at = interaction_index;
+
+        is_new
     }
 
     pub fn activate_node(&mut self, node_id: u64, interaction_index: u64) -> Result<(), BrainError> {
@@ -521,7 +530,7 @@ impl BrainState {
         let concept_name_norm = normalize_input(concept_name)?;
         
         // 1. Get or register the concept node
-        let concept_token_id = if let Some(&id) = self.tokenizer.lookup.get(&concept_name_norm) {
+        let concept_token_id = if let Some(id) = self.tokenizer.get_token_id(&concept_name_norm) {
             id
         } else {
             let id = self.allocate_node_id();
@@ -539,14 +548,14 @@ impl BrainState {
             composition: Vec::new(),
         });
         concept_node.kind = NodeKind::Concept; // force it to be Concept kind if it wasn't
-
+ 
         // 2. Register each member term and create a ConceptMember edge from the member to the concept
         for term in member_terms {
             let term_norm = normalize_input(term)?;
             if term_norm.is_empty() {
                 continue;
             }
-            let member_token_id = if let Some(&id) = self.tokenizer.lookup.get(&term_norm) {
+            let member_token_id = if let Some(id) = self.tokenizer.get_token_id(&term_norm) {
                 id
             } else {
                 let id = self.allocate_node_id();
@@ -612,20 +621,28 @@ impl BrainState {
             }
         }
 
-        // Register candidates
+        // Register candidates only when frequency threshold is met
         for (surface, level) in candidates {
-            let check_key = match level {
-                TokenLevel::Sensor => surface.clone(),
-                TokenLevel::Word | TokenLevel::Phrase => {
-                    format!("{}{}", super::tokenizer::WORD_BOUNDARY, surface)
-                }
+            let count = self.tokenizer.record_surface(&surface);
+            let threshold = match level {
+                TokenLevel::Word => self.config.word_promotion_threshold,
+                TokenLevel::Phrase => self.config.phrase_promotion_threshold,
+                _ => 2,
             };
-            if !self.tokenizer.lookup.contains_key(&check_key) {
-                self.create_token_node(&surface, level, interaction_index)?;
-                match level {
-                    TokenLevel::Word => report.new_word_tokens.push(surface),
-                    TokenLevel::Phrase => report.new_phrase_tokens.push(surface),
-                    _ => {}
+            if count >= threshold {
+                let check_key = match level {
+                    TokenLevel::Sensor => surface.clone(),
+                    TokenLevel::Word | TokenLevel::Phrase => {
+                        format!("{}{}", super::tokenizer::WORD_BOUNDARY, surface)
+                    }
+                };
+                if !self.tokenizer.lookup.contains_key(&check_key) {
+                    self.create_token_node(&surface, level, interaction_index)?;
+                    match level {
+                        TokenLevel::Word => report.new_word_tokens.push(surface),
+                        TokenLevel::Phrase => report.new_phrase_tokens.push(surface),
+                        _ => {}
+                    }
                 }
             }
         }

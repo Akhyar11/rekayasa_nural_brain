@@ -13,7 +13,6 @@ impl BrainState {
             if edge.kind != EdgeKind::ConceptMember
                 && edge.strength < self.config.min_edge_strength
                 && age >= stale_after
-                && edge.activation_count <= 1
             {
                 edges_to_remove.push(key.clone());
             }

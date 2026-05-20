@@ -22,19 +22,16 @@ mod tests {
         config.dynamic_vocab = true;
         let mut brain = BrainState::new(config).expect("brain should initialize");
 
-        brain
+        let _first = brain
             .learn_text("halo dunia")
             .expect("learning should pass");
         let second = brain
             .learn_text("halo dunia")
             .expect("learning should pass");
-        let third = brain
-            .learn_text("halo dunia")
-            .expect("learning should pass");
 
         assert!(second.new_word_tokens.iter().any(|token| token == "halo"));
         assert!(
-            third
+            second
                 .new_phrase_tokens
                 .iter()
                 .any(|token| token == "halo dunia")
@@ -358,7 +355,10 @@ mod tests {
 
     #[test]
     fn length_based_vocabulary_compression_rule() {
-        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+        let mut config = BrainConfig::default();
+        config.word_promotion_threshold = 1;
+        config.dynamic_vocab = true;
+        let mut brain = BrainState::new(config).expect("brain should initialize");
 
         // 1. "xyzxyzxyz" is an out-of-vocabulary word.
         // Initially, BPE tokenizer decomposes it into character tokens (>3 tokens).
