@@ -1,5 +1,7 @@
 # Arsitektur Otak Dinamis
 
+Implementasi terbaru tidak lagi berhenti di `next-token continuation`. Lapisan respons sekarang memakai pola `language action selection`: sistem membangkitkan beberapa kandidat respons, mengevaluasi konsistensi dan kecocokan memori, lalu memilih jalur bahasa yang paling stabil.
+
 ## Tujuan
 
 Mode `chat` dirancang sebagai fondasi `dynamic persistent brain`, bukan model fixed-size. Struktur internal bisa berkembang berdasarkan interaksi:
@@ -29,6 +31,11 @@ Isi state mencakup:
 - pola konteks
 - memori exact prompt-response hasil training pair
 - memori input terbaru
+- sensory memory
+- working memory
+- episodic memory
+- procedural memory
+- neuromodulator state
 
 ### 2. Adaptive Tokenizer
 
@@ -53,6 +60,7 @@ Hubungan yang dipelajari:
 - `Transition`: urutan token ke token
 - `ContextInput`: token pembentuk konteks ke context node
 - `ContextPrediction`: context node ke token lanjutan yang diprediksi
+- `ConceptMember`: anggota token ke concept node untuk soft semantic traversal
 
 ### 3A. Prompt-Response Memory
 
@@ -71,7 +79,99 @@ Untuk dataset `id_personachat`, pasangan training diekstrak dari:
 
 Ini dipilih karena pada format dataset tersebut kandidat terakhir adalah respons target untuk utterance terkait.
 
-### 4. Growth Controller
+### 4. Brain-Native Memory Systems
+
+Mode `chat` sekarang memisahkan memori menjadi beberapa subsistem:
+
+- `sensory_memory`: buffer input mentah terbaru
+- `working_memory`: token, konsep aktif, intent heuristik, predicted outcomes, predicted procedures, goal aktif, tone heuristik, dan confidence interaksi saat ini
+- `episodic_memory`: pasangan prompt-response yang benar-benar pernah dijalani sistem
+- `procedural_memory`: kebiasaan aksi bahasa yang membawa reward intrinsik tinggi
+- `procedure_schemas`: prosedur eksplisit yang telah dipelajari, misalnya `procedure:addition`
+- `semantic cortex`: graph token/context/concept yang tumbuh dinamis
+
+Pemisahan ini membuat pembelajaran tidak tergantung pada satu tabel besar `prompt -> response`.
+
+### 5. Basal Ganglia Style Action Selection
+
+Respons tidak lagi dipilih hanya dengan meneruskan token satu per satu. Pipeline sekarang:
+
+```text
+prompt
+→ exact recall / similar prompt / episodic recall / graph continuation
+→ self-evaluation
+→ pilih kandidat aksi bahasa terbaik
+→ keluarkan teks
+```
+
+Setiap kandidat dinilai dengan kombinasi:
+
+- kecocokan konteks
+- kecocokan episodik
+- keselarasan semantik
+- novelty
+- confidence
+- reward historis
+- prediction mismatch penalty
+
+Nilai ini dimodulasi lagi oleh `dopamine`, `acetylcholine`, dan `serotonin-like stability`.
+
+Untuk konteks yang cocok dengan prosedur yang sudah dipelajari, selector sekarang juga bisa memunculkan jalur `procedural reasoning`. Ini penting agar sistem tidak jatuh kembali ke hafalan contoh saat sebenarnya sudah punya prosedur yang dapat digeneralisasi.
+
+### 5A. Procedural Generalization
+
+Sistem sekarang mulai membentuk `procedure schema` dari pola aritmetika sederhana:
+
+```text
+2 + 3 = 5
+4 + 2 = 6
+```
+
+akan memperkuat konsep:
+
+- `procedure:addition`
+- relasi operator `+`
+- kemampuan menyelesaikan kasus baru seperti `5 + 6`
+
+Jalur ini memakai prosedur yang diterapkan ulang, bukan exact recall dari contoh.
+
+### 6. Local Plasticity
+
+Sesudah aksi dipilih:
+
+- jalur prompt → respons terpilih diperkuat
+- respons yang kalah dilemahkan sedikit pada edge awalnya
+- reward tinggi memperbarui procedural memory
+- keberhasilan prosedur memperbarui `procedure_schemas`
+- episode disimpan ke episodic memory
+
+Ini menjaga aturan belajar tetap lokal, bukan gradient global.
+
+### 7. Replay / Consolidation
+
+Secara periodik, episode bernilai tinggi di-replay:
+
+- transisi respons diperkuat ulang
+- bridge prompt → respons diperkuat ulang
+- exact prompt-response memory bisa distabilkan jika reward internal melewati ambang
+
+Replay ini berfungsi sebagai `sleep consolidation` ringan di mode `chat`.
+
+### 7A. Predictive Processing
+
+Sebelum finalisasi respons, brain sekarang menyimpan:
+
+- predicted outcomes
+- predicted procedures
+- prediction error
+
+`prediction error` dipakai sebagai sinyal mismatch untuk:
+
+- menurunkan reward intrinsik saat respons kurang konsisten
+- menaikkan `acetylcholine` saat kejutan atau mismatch tinggi
+- membedakan goal yang terselesaikan vs masih unresolved di working memory
+
+### 8. Growth Controller
 
 Keputusan berkembang dibuat oleh model melalui statistik interaksi:
 
@@ -81,7 +181,7 @@ Keputusan berkembang dibuat oleh model melalui statistik interaksi:
 - kekuatan edge
 - umur aktivasi terakhir
 
-### 5. Pruning
+### 9. Pruning
 
 Agar graph tidak tumbuh liar:
 
@@ -91,16 +191,17 @@ Agar graph tidak tumbuh liar:
 
 ## Batas Realistis
 
-Arsitektur ini adalah fondasi yang kuat untuk `incremental adaptive memory`, tetapi belum sama dengan LLM modern. Saat ini keluaran model masih berbasis:
+Arsitektur ini sekarang lebih dekat ke `brain-native cognitive engine`, tetapi tetap belum sama dengan sistem bahasa modern skala besar. Keterbatasan utama saat ini:
 
-- continuation dari graph
-- recall pola konteks
-- asosiasi dari input yang sudah dipelajari
+- intent inference masih heuristik
+- semantic memory masih ditopang graph simbolik, belum embedding konseptual penuh
+- reward masih intrinsik, belum punya loop evaluasi eksternal yang kaya
+- replay masih sinkron di runtime chat, belum idle scheduler terpisah
 
-Untuk menjadi sistem yang lebih kuat lagi, tahap lanjutan yang paling bernilai adalah:
+Tahap lanjut yang paling bernilai:
 
-- embedding atau similarity layer
-- scoring prediction yang lebih kaya
-- compression/merge node konseptual
-- benchmark kualitas interaksi
-- format checkpoint binary yang lebih terkompresi lagi jika ukuran state sudah besar
+- evaluasi reward eksternal atau human feedback lokal
+- pembentukan intent/action columns yang lebih eksplisit
+- replay asinkron saat idle
+- semantic compression atau merge concept node
+- benchmark kualitas percakapan berbasis tugas

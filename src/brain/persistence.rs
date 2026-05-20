@@ -4,8 +4,9 @@ use std::path::Path;
 use super::config::BrainConfig;
 use super::error::BrainError;
 use super::state::{
-    temporary_state_path, BrainState, LegacyBrainStateV1, LegacyBrainStateV2,
-    LEGACY_STATE_VERSION_V1, LEGACY_STATE_VERSION_V2, STATE_VERSION,
+    BrainState, LEGACY_STATE_VERSION_V1, LEGACY_STATE_VERSION_V2, LEGACY_STATE_VERSION_V3,
+    LegacyBrainStateV1, LegacyBrainStateV2, LegacyBrainStateV3, STATE_VERSION,
+    temporary_state_path,
 };
 
 impl BrainState {
@@ -27,6 +28,9 @@ impl BrainState {
             let mut state: Self = serde_json::from_slice(&bytes)?;
             match state.state_version {
                 STATE_VERSION => {}
+                LEGACY_STATE_VERSION_V3 => {
+                    state.state_version = STATE_VERSION;
+                }
                 LEGACY_STATE_VERSION_V2 => {
                     state.state_version = STATE_VERSION;
                 }
@@ -40,10 +44,14 @@ impl BrainState {
             state.rebuild_inverted_index();
             Ok(state)
         } else {
-            match bincode::serde::decode_from_slice::<Self, _>(&bytes, bincode::config::standard()) {
+            match bincode::serde::decode_from_slice::<Self, _>(&bytes, bincode::config::standard())
+            {
                 Ok((mut state, _bytes_read)) => {
                     match state.state_version {
                         STATE_VERSION => {}
+                        LEGACY_STATE_VERSION_V3 => {
+                            state.state_version = STATE_VERSION;
+                        }
                         LEGACY_STATE_VERSION_V2 => {
                             state.state_version = STATE_VERSION;
                         }
@@ -59,6 +67,22 @@ impl BrainState {
                     Ok(state)
                 }
                 Err(current_error) => {
+                    if let Ok((legacy, _bytes_read)) =
+                        bincode::serde::decode_from_slice::<LegacyBrainStateV3, _>(
+                            &bytes,
+                            bincode::config::standard(),
+                        )
+                    {
+                        if legacy.state_version != LEGACY_STATE_VERSION_V3 {
+                            return Err(BrainError::UnsupportedStateVersion(legacy.state_version));
+                        }
+                        let mut state: Self = legacy.into();
+                        state.config.validate()?;
+                        state.tokenizer.rebuild_trie();
+                        state.rebuild_inverted_index();
+                        return Ok(state);
+                    }
+
                     // Try Legacy V2
                     match bincode::serde::decode_from_slice::<LegacyBrainStateV2, _>(
                         &bytes,
@@ -66,7 +90,9 @@ impl BrainState {
                     ) {
                         Ok((legacy, _bytes_read)) => {
                             if legacy.state_version != LEGACY_STATE_VERSION_V2 {
-                                return Err(BrainError::UnsupportedStateVersion(legacy.state_version));
+                                return Err(BrainError::UnsupportedStateVersion(
+                                    legacy.state_version,
+                                ));
                             }
                             let mut state: Self = legacy.into();
                             state.config.validate()?;
@@ -82,7 +108,9 @@ impl BrainState {
                             ) {
                                 Ok((legacy, _bytes_read)) => {
                                     if legacy.state_version != LEGACY_STATE_VERSION_V1 {
-                                        return Err(BrainError::UnsupportedStateVersion(legacy.state_version));
+                                        return Err(BrainError::UnsupportedStateVersion(
+                                            legacy.state_version,
+                                        ));
                                     }
                                     let mut state: Self = legacy.into();
                                     state.config.validate()?;

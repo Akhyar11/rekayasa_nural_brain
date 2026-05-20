@@ -5,7 +5,7 @@
 Project ini sekarang punya dua mode utama:
 
 - `train`: bootstrap brain dari file pasangan prompt-response.
-- `chat`: mode utama untuk brain dinamis yang belajar dan menyimpan state.
+- `chat`: mode utama untuk brain dinamis yang belajar, memilih aksi bahasa, dan menyimpan state.
 - `simulate`: mode eksperimen untuk simulator PSCM fixed-size.
 
 ## Prasyarat
@@ -130,6 +130,10 @@ Mode `inspect` memuat file state lalu menampilkan:
 - komposisi sensor/word/phrase token
 - jumlah context node
 - jumlah edge
+- jumlah sensory/episodic/procedural memory
+- jumlah `procedure_schemas`
+- status working memory
+- level neuromodulator
 - token terbaru
 - edge terkuat
 
@@ -169,6 +173,17 @@ Mode `train` akan:
 - menyimpan checkpoint `.bin` pada setiap checkpoint monitoring
 - memakai `rayon` untuk mempercepat pembacaan dan preparasi dataset
 - menyimpan state biner hasil bootstrap
+
+Mode `chat` sekarang juga akan:
+
+- menyimpan `sensory_memory` dari input terbaru
+- memperbarui `working_memory` aktif
+- menyimpan episode prompt-response ke `episodic_memory`
+- memperbarui `procedural_memory` berdasarkan reward intrinsik
+- memperbarui `procedure_schemas` saat menemukan aturan aritmetika atau berhasil memakai prosedur
+- menyimpan `prediction_error`, `predicted_outcomes`, dan `predicted_procedures`
+- menandai goal aktif sebagai resolved atau unresolved
+- menjalankan replay konsolidasi periodik
 
 Runtime akan gagal cepat untuk:
 

@@ -10,8 +10,8 @@ use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rekayasa_nural_brain::{
     ActiveTickSnapshot, BrainConfig, BrainEdgeSummary, BrainState, BrainSummary, ConnectionSummary,
-    InteractionReport, SimulationConfig, SimulationError, SimulationReport, SpikingTokenizer,
-    TrainingExampleReport, run_simulation, run_simulation_with_observer,
+    InteractionReport, ResponseActionSource, SimulationConfig, SimulationError, SimulationReport,
+    SpikingTokenizer, TrainingExampleReport, run_simulation, run_simulation_with_observer,
 };
 use serde::Deserialize;
 
@@ -464,8 +464,43 @@ where
                 parse_usize(&next_value(args, "--memory-window")?, "--memory-window")?;
             Ok(true)
         }
+        "--sensory-memory" => {
+            config.sensory_memory_capacity =
+                parse_usize(&next_value(args, "--sensory-memory")?, "--sensory-memory")?;
+            Ok(true)
+        }
+        "--episodic-memory" => {
+            config.episodic_memory_capacity =
+                parse_usize(&next_value(args, "--episodic-memory")?, "--episodic-memory")?;
+            Ok(true)
+        }
+        "--working-memory" => {
+            config.working_memory_capacity =
+                parse_usize(&next_value(args, "--working-memory")?, "--working-memory")?;
+            Ok(true)
+        }
+        "--replay-interval" => {
+            config.replay_interval =
+                parse_u64(&next_value(args, "--replay-interval")?, "--replay-interval")?;
+            Ok(true)
+        }
+        "--replay-batch-size" => {
+            config.replay_batch_size = parse_usize(
+                &next_value(args, "--replay-batch-size")?,
+                "--replay-batch-size",
+            )?;
+            Ok(true)
+        }
+        "--self-reward-threshold" => {
+            config.self_reward_threshold = parse_f32(
+                &next_value(args, "--self-reward-threshold")?,
+                "--self-reward-threshold",
+            )?;
+            Ok(true)
+        }
         "--temperature" => {
-            config.generation_config.temperature = parse_f32(&next_value(args, "--temperature")?, "--temperature")?;
+            config.generation_config.temperature =
+                parse_f32(&next_value(args, "--temperature")?, "--temperature")?;
             Ok(true)
         }
         "--top-k" => {
@@ -477,19 +512,81 @@ where
             Ok(true)
         }
         "--repetition-penalty" => {
-            config.generation_config.repetition_penalty = parse_f32(&next_value(args, "--repetition-penalty")?, "--repetition-penalty")?;
+            config.generation_config.repetition_penalty = parse_f32(
+                &next_value(args, "--repetition-penalty")?,
+                "--repetition-penalty",
+            )?;
             Ok(true)
         }
         "--min-confidence" => {
-            config.generation_config.min_confidence = parse_f32(&next_value(args, "--min-confidence")?, "--min-confidence")?;
+            config.generation_config.min_confidence =
+                parse_f32(&next_value(args, "--min-confidence")?, "--min-confidence")?;
             Ok(true)
         }
         "--seed" => {
-            config.generation_config.randomness_seed = Some(parse_u64(&next_value(args, "--seed")?, "--seed")?);
+            config.generation_config.randomness_seed =
+                Some(parse_u64(&next_value(args, "--seed")?, "--seed")?);
+            Ok(true)
+        }
+        "--action-candidates" => {
+            config.generation_config.action_candidate_limit = parse_usize(
+                &next_value(args, "--action-candidates")?,
+                "--action-candidates",
+            )?;
+            Ok(true)
+        }
+        "--graph-candidates" => {
+            config.generation_config.graph_candidate_count = parse_usize(
+                &next_value(args, "--graph-candidates")?,
+                "--graph-candidates",
+            )?;
+            Ok(true)
+        }
+        "--action-context-weight" => {
+            config.generation_config.action_context_weight = parse_f32(
+                &next_value(args, "--action-context-weight")?,
+                "--action-context-weight",
+            )?;
+            Ok(true)
+        }
+        "--action-episodic-weight" => {
+            config.generation_config.action_episodic_weight = parse_f32(
+                &next_value(args, "--action-episodic-weight")?,
+                "--action-episodic-weight",
+            )?;
+            Ok(true)
+        }
+        "--action-semantic-weight" => {
+            config.generation_config.action_semantic_weight = parse_f32(
+                &next_value(args, "--action-semantic-weight")?,
+                "--action-semantic-weight",
+            )?;
+            Ok(true)
+        }
+        "--action-novelty-weight" => {
+            config.generation_config.action_novelty_weight = parse_f32(
+                &next_value(args, "--action-novelty-weight")?,
+                "--action-novelty-weight",
+            )?;
+            Ok(true)
+        }
+        "--action-confidence-weight" => {
+            config.generation_config.action_confidence_weight = parse_f32(
+                &next_value(args, "--action-confidence-weight")?,
+                "--action-confidence-weight",
+            )?;
+            Ok(true)
+        }
+        "--action-reward-weight" => {
+            config.generation_config.action_reward_weight = parse_f32(
+                &next_value(args, "--action-reward-weight")?,
+                "--action-reward-weight",
+            )?;
             Ok(true)
         }
         "--dynamic-vocab" => {
-            config.dynamic_vocab = parse_bool(&next_value(args, "--dynamic-vocab")?, "--dynamic-vocab")?;
+            config.dynamic_vocab =
+                parse_bool(&next_value(args, "--dynamic-vocab")?, "--dynamic-vocab")?;
             Ok(true)
         }
         _ => Ok(false),
@@ -627,7 +724,7 @@ fn run_chat(options: ChatRuntimeOptions) -> ExitCode {
                         Err(error) => eprintln!("Generasi respons gagal: {error}"),
                     }
                 }
-            },
+            }
         }
     }
 
@@ -780,7 +877,10 @@ fn run_dump(options: DumpRuntimeOptions) -> ExitCode {
             print_brain_summary(&brain.summary(20));
         }
         DumpMode::Tokens => {
-            println!("=== TOKENS DUMP (total: {}) ===", brain.tokenizer.entries.len());
+            println!(
+                "=== TOKENS DUMP (total: {}) ===",
+                brain.tokenizer.entries.len()
+            );
             for (token_id, entry) in &brain.tokenizer.entries {
                 println!(
                     "#{:<5} | {:<8?} | Occ: {:<5} | {:?}",
@@ -800,7 +900,10 @@ fn run_dump(options: DumpRuntimeOptions) -> ExitCode {
             }
         }
         DumpMode::Contexts => {
-            println!("=== CONTEXTS DUMP (total: {}) ===", brain.context_patterns.len());
+            println!(
+                "=== CONTEXTS DUMP (total: {}) ===",
+                brain.context_patterns.len()
+            );
             for pattern in brain.context_patterns.values() {
                 println!(
                     "Pattern: {:<35} | Occ: {:<5} | Node ID: {:?}",
@@ -814,40 +917,143 @@ fn run_dump(options: DumpRuntimeOptions) -> ExitCode {
         }
         DumpMode::Memory => {
             println!("=== MEMORY DUMP ===");
-            println!("--- Prompt Response Memory (total keys: {}) ---", brain.prompt_response_memory.len());
+            println!(
+                "--- Prompt Response Memory (total keys: {}) ---",
+                brain.prompt_response_memory.len()
+            );
             for (prompt, responses) in &brain.prompt_response_memory {
                 println!("Prompt: {:?}", prompt);
                 for (response, count) in responses {
                     println!("  -> Response: {:<40} | count: {}", response, count);
                 }
             }
-            println!("\n--- Recent Utterances (total: {}) ---", brain.recent_utterances.len());
+            println!(
+                "\n--- Recent Utterances (total: {}) ---",
+                brain.recent_utterances.len()
+            );
             for utterance in &brain.recent_utterances {
+                println!("  [{}] {:?}", utterance.interaction_index, utterance.text);
+            }
+            println!(
+                "\n--- Sensory Memory (total: {}) ---",
+                brain.sensory_memory.len()
+            );
+            for frame in &brain.sensory_memory {
+                println!("  [{}] {:?}", frame.interaction_index, frame.text);
+            }
+            println!(
+                "\n--- Episodic Memory (total: {}) ---",
+                brain.episodic_memory.len()
+            );
+            for episode in &brain.episodic_memory {
                 println!(
-                    "  [{}] {:?}",
-                    utterance.interaction_index, utterance.text
+                    "  [{}] {:?} => {:?} | source {} | reward {:.2} | confidence {:.2}",
+                    episode.interaction_index,
+                    episode.prompt,
+                    episode.response,
+                    response_action_source_label(episode.source),
+                    episode.reward,
+                    episode.confidence
                 );
             }
+            println!(
+                "\n--- Procedure Schemas (total: {}) ---",
+                brain.procedure_schemas.len()
+            );
+            for schema in brain.procedure_schemas.values() {
+                println!(
+                    "  {} | evidence {} | uses {} | success {} | confidence {:.2} | reward {:.2} | prediction error {:.2}",
+                    schema.name,
+                    schema.evidence_count,
+                    schema.use_count,
+                    schema.success_count,
+                    schema.confidence(),
+                    schema.average_reward(),
+                    schema.last_prediction_error
+                );
+            }
+            println!(
+                "\n--- Working Memory ---\n  text: {:?}\n  intents: {}\n  concepts: {}\n  procedures: {}\n  unresolved goals: {}\n  resolved goals: {}\n  tone: {}\n  prediction error: {:.2}\n  confidence: {:.2}",
+                brain.working_memory.active_text,
+                brain.working_memory.predicted_intents.join(", "),
+                brain.working_memory.active_concepts.join(", "),
+                brain.working_memory.predicted_procedures.join(", "),
+                brain.working_memory.unresolved_goals.join(" | "),
+                brain.working_memory.resolved_goals.join(" | "),
+                brain.working_memory.emotional_tone,
+                brain.working_memory.prediction_error,
+                brain.working_memory.confidence
+            );
+            println!(
+                "\n--- Neuromodulator ---\n  dopamine {:.2} | acetylcholine {:.2} | serotonin {:.2}",
+                brain.neuromodulator.dopamine,
+                brain.neuromodulator.acetylcholine,
+                brain.neuromodulator.serotonin
+            );
         }
         DumpMode::Distribution => {
-            let prompt_text = options.prompt.clone().or_else(|| {
-                brain.recent_utterances.back().map(|u| u.text.clone())
-            });
+            let prompt_text = options
+                .prompt
+                .clone()
+                .or_else(|| brain.recent_utterances.back().map(|u| u.text.clone()));
             if let Some(text) = prompt_text {
                 println!("=== DISTRIBUTION DUMP FOR PROMPT: {:?} ===", text);
-                let normalized = rekayasa_nural_brain::brain::learning::normalize_input(&text).unwrap_or_default();
+                let normalized = rekayasa_nural_brain::brain::learning::normalize_input(&text)
+                    .unwrap_or_default();
                 let token_ids = brain.tokenizer.tokenize(&normalized);
-                let distribution = brain.next_token_distribution(&token_ids, &[], &[], &brain.config.generation_config);
-                println!("Candidates (total: {}):", distribution.len());
+                if let Ok(selection) = brain.generate_action_selection_with_seed(
+                    &text,
+                    brain.config.generation_config.randomness_seed,
+                    &brain.config.generation_config,
+                ) {
+                    println!(
+                        "Chosen action: {} | procedure {} | prediction error {:.2}",
+                        response_action_source_label(selection.chosen.source),
+                        selection.chosen.procedure_name.as_deref().unwrap_or("-"),
+                        selection.prediction_error
+                    );
+                    println!("Action candidates (total: {}):", selection.candidates.len());
+                    for candidate in &selection.candidates {
+                        println!(
+                            "  Action: {:<40} | Score: {:.4} | Source: {:<18} | Procedure: {:<22} | Ctx {:.2} | Episodic {:.2} | Semantic {:.2} | Novelty {:.2} | Confidence {:.2}",
+                            candidate.response,
+                            candidate.score,
+                            response_action_source_label(candidate.source),
+                            candidate.procedure_name.as_deref().unwrap_or("-"),
+                            candidate.context_match,
+                            candidate.episodic_match,
+                            candidate.semantic_match,
+                            candidate.novelty,
+                            candidate.confidence
+                        );
+                    }
+                    println!();
+                }
+                let distribution = brain.next_token_distribution(
+                    &token_ids,
+                    &token_ids,
+                    &[],
+                    &brain.config.generation_config,
+                );
+                println!(
+                    "First-step token candidates (total: {}):",
+                    distribution.len()
+                );
                 for candidate in distribution {
                     let lbl = brain.node_label(candidate.token_id);
                     println!(
                         "  Token: {:<20} (ID: #{}) | Prob: {:.4} | Score: {:.4} | Source: {:?}",
-                        lbl, candidate.token_id, candidate.probability, candidate.score, candidate.source
+                        lbl,
+                        candidate.token_id,
+                        candidate.probability,
+                        candidate.score,
+                        candidate.source
                     );
                 }
             } else {
-                println!("Gunakan --prompt <teks> untuk menampilkan distribusi probabilitas token.");
+                println!(
+                    "Gunakan --prompt <teks> untuk menampilkan distribusi probabilitas token."
+                );
             }
         }
     }
@@ -977,6 +1183,14 @@ fn print_connections(connections: &[ConnectionSummary]) {
 
 fn print_interaction_report(report: &InteractionReport) {
     println!("brain> {}", report.response);
+    println!(
+        "selection> source {} | procedure {} | score {:.2} | prediction error {:.2} | replay {}",
+        response_action_source_label(report.response_source),
+        report.selected_procedure.as_deref().unwrap_or("-"),
+        report.response_score,
+        report.prediction_error,
+        report.replayed_episodes
+    );
 
     let learning = &report.learning;
     if !learning.new_sensor_tokens.is_empty()
@@ -1425,6 +1639,20 @@ fn print_brain_summary(summary: &BrainSummary) {
     println!("context nodes       : {}", summary.context_node_count);
     println!("edges               : {}", summary.edge_count);
     println!("remembered inputs   : {}", summary.remembered_utterances);
+    println!("sensory frames      : {}", summary.sensory_frames);
+    println!("episodic memories   : {}", summary.episodic_memories);
+    println!("procedural patterns : {}", summary.procedural_patterns);
+    println!("procedure schemas   : {}", summary.procedure_schemas);
+    println!("working mem tokens  : {}", summary.working_memory_tokens);
+    println!("working mem concepts: {}", summary.working_memory_concepts);
+    println!("unresolved goals    : {}", summary.unresolved_goals);
+    println!("predicted procedures: {}", summary.predicted_procedures);
+    println!("prediction error    : {:.2}", summary.prediction_error);
+    println!("emotional tone      : {}", summary.emotional_tone);
+    println!(
+        "neuromodulator      : DA {:.2} | ACh {:.2} | 5-HT {:.2}",
+        summary.dopamine, summary.acetylcholine, summary.serotonin
+    );
     if !summary.latest_tokens.is_empty() {
         println!("latest tokens       : {}", summary.latest_tokens.join(", "));
     }
@@ -1454,6 +1682,18 @@ fn edge_kind_label(kind: rekayasa_nural_brain::brain::EdgeKind) -> &'static str 
         rekayasa_nural_brain::brain::EdgeKind::ContextInput => "context-input",
         rekayasa_nural_brain::brain::EdgeKind::ContextPrediction => "context-prediction",
         rekayasa_nural_brain::brain::EdgeKind::ConceptMember => "concept-member",
+    }
+}
+
+fn response_action_source_label(source: ResponseActionSource) -> &'static str {
+    match source {
+        ResponseActionSource::ProceduralReasoning => "procedural-reasoning",
+        ResponseActionSource::ExactRecall => "exact-recall",
+        ResponseActionSource::SimilarPrompt => "similar-prompt",
+        ResponseActionSource::EpisodicMemory => "episodic-memory",
+        ResponseActionSource::GraphContinuation => "graph-continuation",
+        ResponseActionSource::RecentMemory => "recent-memory",
+        ResponseActionSource::ReflectiveFallback => "reflective-fallback",
     }
 }
 
@@ -1636,6 +1876,20 @@ Options:
   --min-edge-strength <value>     Ambang hapus edge lemah
   --response-token-limit <n>      Batas token balasan yang digenerasi
   --memory-window <n>             Jumlah input yang diingat
+  --sensory-memory <n>            Kapasitas sensory memory
+  --episodic-memory <n>           Kapasitas episodic memory
+  --working-memory <n>            Kapasitas working memory aktif
+  --replay-interval <n>           Interval replay konsolidasi
+  --replay-batch-size <n>         Jumlah episode per replay
+  --self-reward-threshold <v>     Ambang reward agar jalur distabilkan
+  --action-candidates <n>         Jumlah kandidat aksi bahasa yang dievaluasi
+  --graph-candidates <n>          Jumlah kandidat dari graph continuation
+  --action-context-weight <v>     Bobot kecocokan konteks di selector
+  --action-episodic-weight <v>    Bobot memori episodik di selector
+  --action-semantic-weight <v>    Bobot keselarasan semantik di selector
+  --action-novelty-weight <v>     Bobot novelty di selector
+  --action-confidence-weight <v>  Bobot confidence di selector
+  --action-reward-weight <v>      Bobot reward historis di selector
   --dynamic-vocab <true|false>    Kembangkan vocabulary secara dinamis (default: true)
 
 Examples:
@@ -1667,6 +1921,20 @@ Options:
   --min-edge-strength <value>     Ambang hapus edge lemah
   --response-token-limit <n>      Batas token balasan yang digenerasi
   --memory-window <n>             Jumlah input yang diingat
+  --sensory-memory <n>            Kapasitas sensory memory
+  --episodic-memory <n>           Kapasitas episodic memory
+  --working-memory <n>            Kapasitas working memory aktif
+  --replay-interval <n>           Interval replay konsolidasi
+  --replay-batch-size <n>         Jumlah episode per replay
+  --self-reward-threshold <v>     Ambang reward agar jalur distabilkan
+  --action-candidates <n>         Jumlah kandidat aksi bahasa yang dievaluasi
+  --graph-candidates <n>          Jumlah kandidat dari graph continuation
+  --action-context-weight <v>     Bobot kecocokan konteks di selector
+  --action-episodic-weight <v>    Bobot memori episodik di selector
+  --action-semantic-weight <v>    Bobot keselarasan semantik di selector
+  --action-novelty-weight <v>     Bobot novelty di selector
+  --action-confidence-weight <v>  Bobot confidence di selector
+  --action-reward-weight <v>      Bobot reward historis di selector
   --dynamic-vocab <true|false>    Kembangkan vocabulary secara dinamis (default: true)
 
 Format file:
@@ -1706,8 +1974,8 @@ Options:
   --tokens                        Dump seluruh daftar token vocabulary terperinci
   --edges                         Dump seluruh edge network graph terperinci
   --contexts                      Dump seluruh context patterns beserta prediksi
-  --memory                        Dump recent memory dan prompt-response memory
-  --distribution                  Dump distribusi probabilitas token berikutnya
+  --memory                        Dump seluruh sistem memori dan neuromodulator
+  --distribution                  Dump kandidat aksi bahasa dan token kandidat awal
   --prompt <teks>                 Prompt kustom untuk dump --distribution
 "
 }

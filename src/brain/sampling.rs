@@ -1,5 +1,5 @@
-use super::generation::TokenCandidate;
 use super::config::GenerationConfig;
+use super::generation::TokenCandidate;
 
 pub struct SimpleRng {
     state: u64,
@@ -32,10 +32,7 @@ impl SimpleRng {
     }
 }
 
-pub fn sample_next_token(
-    candidates: &[TokenCandidate],
-    config: &GenerationConfig,
-) -> Option<u64> {
+pub fn sample_next_token(candidates: &[TokenCandidate], config: &GenerationConfig) -> Option<u64> {
     if candidates.is_empty() {
         return None;
     }

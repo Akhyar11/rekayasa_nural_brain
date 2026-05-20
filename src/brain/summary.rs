@@ -22,6 +22,19 @@ pub struct BrainSummary {
     pub context_node_count: usize,
     pub edge_count: usize,
     pub remembered_utterances: usize,
+    pub sensory_frames: usize,
+    pub episodic_memories: usize,
+    pub procedural_patterns: usize,
+    pub procedure_schemas: usize,
+    pub working_memory_tokens: usize,
+    pub working_memory_concepts: usize,
+    pub unresolved_goals: usize,
+    pub predicted_procedures: usize,
+    pub prediction_error: f32,
+    pub emotional_tone: String,
+    pub dopamine: f32,
+    pub acetylcholine: f32,
+    pub serotonin: f32,
     pub latest_tokens: Vec<String>,
     pub strongest_edges: Vec<BrainEdgeSummary>,
 }
@@ -48,7 +61,8 @@ impl BrainState {
             })
             .collect();
 
-        let mut latest_tokens: Vec<&super::tokenizer::TokenEntry> = self.tokenizer.entries.values().collect();
+        let mut latest_tokens: Vec<&super::tokenizer::TokenEntry> =
+            self.tokenizer.entries.values().collect();
         latest_tokens.sort_by(|left, right| {
             right
                 .created_at
@@ -86,6 +100,19 @@ impl BrainState {
                 .count(),
             edge_count: self.edges.len(),
             remembered_utterances: self.recent_utterances.len(),
+            sensory_frames: self.sensory_memory.len(),
+            episodic_memories: self.episodic_memory.len(),
+            procedural_patterns: self.procedural_memory.len(),
+            procedure_schemas: self.procedure_schemas.len(),
+            working_memory_tokens: self.working_memory.active_token_ids.len(),
+            working_memory_concepts: self.working_memory.active_concept_ids.len(),
+            unresolved_goals: self.working_memory.unresolved_goals.len(),
+            predicted_procedures: self.working_memory.predicted_procedures.len(),
+            prediction_error: self.working_memory.prediction_error,
+            emotional_tone: self.working_memory.emotional_tone.clone(),
+            dopamine: self.neuromodulator.dopamine,
+            acetylcholine: self.neuromodulator.acetylcholine,
+            serotonin: self.neuromodulator.serotonin,
             latest_tokens: latest_tokens
                 .into_iter()
                 .take(8)

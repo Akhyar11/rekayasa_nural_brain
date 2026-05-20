@@ -8,8 +8,9 @@ pub mod synapse;
 pub mod tokenizer;
 
 pub use brain::{
-    BrainConfig, BrainEdgeSummary, BrainError, BrainState, BrainSummary, InteractionReport,
-    LearningReport, TrainingExampleReport,
+    ActionSelectionReport, BrainConfig, BrainEdgeSummary, BrainError, BrainState, BrainSummary,
+    InteractionReport, LearningReport, ProcedureKind, ProcedureSchema, ResponseActionCandidate,
+    ResponseActionSource, TrainingExampleReport,
 };
 pub use simulation::{
     ActiveTickSnapshot, ConnectionSummary, NeuronSnapshot, SimulationConfig, SimulationError,

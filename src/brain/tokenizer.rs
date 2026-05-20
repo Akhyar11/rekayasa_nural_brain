@@ -95,7 +95,10 @@ impl Default for AdaptiveTokenizer {
             trie: TokenTrie::default(),
         };
         // Auto-train BPE on default Indonesian bootstrap corpus
-        let corpus: Vec<String> = DEFAULT_BOOTSTRAP_CORPUS.iter().map(|s| s.to_string()).collect();
+        let corpus: Vec<String> = DEFAULT_BOOTSTRAP_CORPUS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         tok.train(&corpus);
         tok
     }
@@ -133,7 +136,10 @@ fn is_mergeable_token(token: &str, special_tokens: &[String]) -> bool {
     if token.is_empty() {
         return false;
     }
-    if special_tokens.iter().any(|t| t == token) || token.starts_with("<UNUSED_") || token.starts_with("<RESERVED_") {
+    if special_tokens.iter().any(|t| t == token)
+        || token.starts_with("<UNUSED_")
+        || token.starts_with("<RESERVED_")
+    {
         return true;
     }
     let without_boundary = token.replace(WORD_BOUNDARY, "");
@@ -150,7 +156,11 @@ fn is_mergeable_token(token: &str, special_tokens: &[String]) -> bool {
 
 fn is_math_or_emoji(c: char) -> bool {
     let cp = c as u32;
-    (cp >= 0x1f000 && cp <= 0x1faff) || (cp >= 0x2600 && cp <= 0x27bf) || (cp >= 0x2070 && cp <= 0x209f) || (cp >= 0x2190 && cp <= 0x21ff) || (cp >= 0x2200 && cp <= 0x22ff)
+    (0x1f000..=0x1faff).contains(&cp)
+        || (0x2600..=0x27bf).contains(&cp)
+        || (0x2070..=0x209f).contains(&cp)
+        || (0x2190..=0x21ff).contains(&cp)
+        || (0x2200..=0x22ff).contains(&cp)
 }
 
 fn apply_merge_in_place(symbols: &mut Vec<String>, left: &str, right: &str, merged: &str) -> bool {
@@ -253,16 +263,19 @@ impl AdaptiveTokenizer {
 
     pub fn touch_token(&mut self, node_id: u64, interaction_index: u64) -> Result<(), BrainError> {
         if !self.entries.contains_key(&node_id) {
-            let text = if let Some(t) = self.lookup.iter().find(|&(_, &id)| id == node_id).map(|(k, _)| k.clone()) {
+            let text = if let Some(t) = self
+                .lookup
+                .iter()
+                .find(|&(_, &id)| id == node_id)
+                .map(|(k, _)| k.clone())
+            {
                 t
             } else {
                 format!("<REVIVED_{}>", node_id)
             };
             self.lookup.insert(text.clone(), node_id);
 
-            let level = if text.starts_with("<") {
-                TokenLevel::Sensor
-            } else if text.chars().count() <= 1 {
+            let level = if text.starts_with("<") || text.chars().count() <= 1 {
                 TokenLevel::Sensor
             } else if text.starts_with(WORD_BOUNDARY) {
                 TokenLevel::Word
@@ -344,11 +357,18 @@ impl AdaptiveTokenizer {
         for &id in token_ids {
             if let Some(entry) = self.get(id) {
                 let text = &entry.text;
-                if text != BOS_TOKEN && text != EOS_TOKEN && text != PAD_TOKEN && text != UNK_TOKEN {
+                if text != BOS_TOKEN && text != EOS_TOKEN && text != PAD_TOKEN && text != UNK_TOKEN
+                {
                     tokens.push(text.clone());
                 }
-            } else if let Some(text) = self.lookup.iter().find(|&(_, &val)| val == id).map(|(k, _)| k.clone()) {
-                if text != BOS_TOKEN && text != EOS_TOKEN && text != PAD_TOKEN && text != UNK_TOKEN {
+            } else if let Some(text) = self
+                .lookup
+                .iter()
+                .find(|&(_, &val)| val == id)
+                .map(|(k, _)| k.clone())
+            {
+                if text != BOS_TOKEN && text != EOS_TOKEN && text != PAD_TOKEN && text != UNK_TOKEN
+                {
                     tokens.push(text);
                 }
             } else {
@@ -400,7 +420,10 @@ impl AdaptiveTokenizer {
                     next_id += 1;
                 }
             }
-            corpus.push(WordSymbols { symbols: chars, freq });
+            corpus.push(WordSymbols {
+                symbols: chars,
+                freq,
+            });
         }
 
         while self.lookup.len() < self.vocab_size || has_long_corpus_entry(&corpus) {
@@ -413,7 +436,8 @@ impl AdaptiveTokenizer {
                     if !is_mergeable_token(&merged, &special_tokens) {
                         continue;
                     }
-                    pair_freq.entry((left.clone(), right.clone()))
+                    pair_freq
+                        .entry((left.clone(), right.clone()))
                         .and_modify(|f| *f += entry.freq)
                         .or_insert(entry.freq);
                 }
@@ -475,9 +499,12 @@ impl AdaptiveTokenizer {
     pub fn build_entries(&mut self, interaction_index: u64) {
         self.entries.clear();
         for (surface, &node_id) in &self.lookup {
-            let level = if surface == PAD_TOKEN || surface == UNK_TOKEN || surface == BOS_TOKEN || surface == EOS_TOKEN {
-                TokenLevel::Sensor
-            } else if surface.chars().count() <= 1 {
+            let level = if surface == PAD_TOKEN
+                || surface == UNK_TOKEN
+                || surface == BOS_TOKEN
+                || surface == EOS_TOKEN
+                || surface.chars().count() <= 1
+            {
                 TokenLevel::Sensor
             } else {
                 let clean = surface.replace(WORD_BOUNDARY, "");

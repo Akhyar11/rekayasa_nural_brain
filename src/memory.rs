@@ -131,24 +131,35 @@ impl MemoryConsolidator {
                 column.feedforward_synapses.retain(|syn| syn.weight > 0.05);
                 column.feedback_synapses.retain(|syn| syn.weight > 0.05);
 
-                for pre in 0..column.num_l4 {
-                    if l4_spikes[pre] {
-                        for post in 0..column.num_l23 {
-                            if l23_spikes[post] {
-                                let exists = column.feedforward_synapses.iter().any(|syn| syn.pre_idx == pre && syn.post_idx == post);
+                for (pre, pre_spiked) in l4_spikes.iter().enumerate().take(column.num_l4) {
+                    if *pre_spiked {
+                        for (post, post_spiked) in
+                            l23_spikes.iter().enumerate().take(column.num_l23)
+                        {
+                            if *post_spiked {
+                                let exists = column
+                                    .feedforward_synapses
+                                    .iter()
+                                    .any(|syn| syn.pre_idx == pre && syn.post_idx == post);
                                 if !exists {
-                                    column.feedforward_synapses.push(Synapse::new(pre, post, 0.1));
+                                    column
+                                        .feedforward_synapses
+                                        .push(Synapse::new(pre, post, 0.1));
                                 }
                             }
                         }
                     }
                 }
 
-                for pre in 0..column.num_l23 {
-                    if l23_spikes[pre] {
-                        for post in 0..column.num_l4 {
-                            if l4_spikes[post] {
-                                let exists = column.feedback_synapses.iter().any(|syn| syn.pre_idx == pre && syn.post_idx == post);
+                for (pre, pre_spiked) in l23_spikes.iter().enumerate().take(column.num_l23) {
+                    if *pre_spiked {
+                        for (post, post_spiked) in l4_spikes.iter().enumerate().take(column.num_l4)
+                        {
+                            if *post_spiked {
+                                let exists = column
+                                    .feedback_synapses
+                                    .iter()
+                                    .any(|syn| syn.pre_idx == pre && syn.post_idx == post);
                                 if !exists {
                                     column.feedback_synapses.push(Synapse::new(pre, post, 0.1));
                                 }

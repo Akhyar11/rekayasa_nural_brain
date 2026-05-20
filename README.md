@@ -2,7 +2,7 @@
 
 Prototype Rust untuk dua mode kerja:
 
-- `chat`: dynamic persistent brain yang belajar dari interaksi dan menyimpan state.
+- `chat`: dynamic persistent brain dengan pemisahan sensory/working/episodic/procedural memory, action selection, prediction mismatch, dan replay lokal.
 - `train`: bootstrap awal dari file `prompt -> response`.
 - `simulate`: simulator PSCM fixed-size untuk eksperimen arsitektur lama.
 
@@ -52,6 +52,12 @@ Lihat ringkasan state brain:
 
 ```bash
 cargo run -- inspect
+```
+
+Lihat kandidat aksi bahasa dan distribusi token awal:
+
+```bash
+cargo run -- dump --distribution --prompt "siapa kamu"
 ```
 
 Jalankan simulator lama:

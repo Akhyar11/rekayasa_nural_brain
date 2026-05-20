@@ -1,12 +1,12 @@
 #[cfg(test)]
-mod tests {
+mod suite {
     use crate::brain::learning::normalize_input;
-    use crate::brain::{BrainConfig, BrainState, STATE_VERSION};
     use crate::brain::state::{
-        LegacyBrainStateV1, LegacyBrainStateV2,
-        LEGACY_STATE_VERSION_V1, LEGACY_STATE_VERSION_V2,
+        LEGACY_STATE_VERSION_V1, LEGACY_STATE_VERSION_V2, LEGACY_STATE_VERSION_V3,
+        LegacyBrainStateV1, LegacyBrainStateV2, LegacyBrainStateV3,
     };
     use crate::brain::tokenizer::{TokenLevel, TokenTrie};
+    use crate::brain::{BrainConfig, BrainState, ResponseActionSource, STATE_VERSION};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -18,8 +18,10 @@ mod tests {
 
     #[test]
     fn brain_grows_word_and_phrase_tokens() {
-        let mut config = BrainConfig::default();
-        config.dynamic_vocab = true;
+        let config = BrainConfig {
+            dynamic_vocab: true,
+            ..Default::default()
+        };
         let mut brain = BrainState::new(config).expect("brain should initialize");
 
         let _first = brain
@@ -58,7 +60,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("clock should be valid")
                 .as_nanos()
-            ));
+        ));
 
         brain.save_to_path(&temp_path).expect("save should pass");
         let loaded = BrainState::load_from_path(&temp_path).expect("load should pass");
@@ -217,6 +219,47 @@ mod tests {
     }
 
     #[test]
+    fn load_legacy_binary_state_and_migrate_v3() {
+        let legacy = LegacyBrainStateV3 {
+            state_version: LEGACY_STATE_VERSION_V3,
+            config: BrainConfig::default(),
+            next_node_id: 1,
+            interaction_count: 3,
+            learning_step_count: 9,
+            training_example_count: 2,
+            tokenizer: Default::default(),
+            nodes: Default::default(),
+            edges: Default::default(),
+            context_patterns: Default::default(),
+            prompt_response_memory: Default::default(),
+            recent_utterances: Default::default(),
+        };
+
+        let temp_path = std::env::temp_dir().join(format!(
+            "rekayasa_nural_brain_legacy_v3_test_{}.bin",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be valid")
+                .as_nanos()
+        ));
+
+        let payload = bincode::serde::encode_to_vec(&legacy, bincode::config::standard())
+            .expect("legacy encoding should pass");
+        std::fs::write(&temp_path, payload).expect("legacy temp file write should pass");
+
+        let migrated = BrainState::load_from_path(&temp_path).expect("legacy load should pass");
+        std::fs::remove_file(&temp_path).expect("temp file should be removable");
+
+        assert_eq!(migrated.state_version, STATE_VERSION);
+        assert_eq!(migrated.interaction_count, 3);
+        assert_eq!(migrated.learning_step_count, 9);
+        assert_eq!(migrated.training_example_count, 2);
+        assert!(migrated.sensory_memory.is_empty());
+        assert!(migrated.episodic_memory.is_empty());
+        assert!(migrated.procedural_memory.is_empty());
+    }
+
+    #[test]
     fn trie_tokenizer_longest_prefix_matching() {
         let mut trie = TokenTrie::default();
         trie.insert("a", 1, TokenLevel::Sensor);
@@ -263,7 +306,7 @@ mod tests {
     #[test]
     fn sampling_mechanics() {
         use crate::brain::sampling::sample_next_token;
-        use crate::brain::{GenerationConfig, TokenCandidate, CandidateSource};
+        use crate::brain::{CandidateSource, GenerationConfig, TokenCandidate};
 
         let candidates = vec![
             TokenCandidate {
@@ -311,7 +354,7 @@ mod tests {
 
         let probs = vec![0.5, 0.5];
         let ent = entropy(&probs);
-        assert!((ent - 0.69314718).abs() < 1e-5);
+        assert!((ent - std::f32::consts::LN_2).abs() < 1e-5);
     }
 
     #[test]
@@ -319,73 +362,106 @@ mod tests {
         let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
         // Latih berulang kali untuk memperkuat transisi suka -> kopi -> hitam
         for _ in 0..5 {
-            brain.learn_text("suka kopi hitam suka kopi hitam").expect("learning should pass");
+            brain
+                .learn_text("suka kopi hitam suka kopi hitam")
+                .expect("learning should pass");
         }
-        
-        let response = brain.generate_response("suka kopi").expect("generation should pass");
-        
+
+        let response = brain
+            .generate_response("suka kopi")
+            .expect("generation should pass");
+
         // Karena ada trigram blocking, perulangan beruntun 3x suka kopi hitam harus terputus
-        assert!(!response.contains("suka kopi hitam suka kopi hitam suka kopi hitam"), 
-            "Response should block consecutive loop, but got: {}", response);
+        assert!(
+            !response.contains("suka kopi hitam suka kopi hitam suka kopi hitam"),
+            "Response should block consecutive loop, but got: {}",
+            response
+        );
     }
 
     #[test]
     fn concept_relational_traversal_enables_soft_reasoning() {
         let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
-        
+
         // 1. Latih transisi "teh manis" beberapa kali agar dipromosikan jadi kata
         for _ in 0..5 {
             brain.learn_text("teh manis").expect("learning should pass");
         }
-        
+
         // 2. Buat konsep "minuman" yang mengelompokkan "kopi" dan "teh"
-        brain.associate_concept(
-            "minuman",
-            &["kopi".to_string(), "teh".to_string()],
-            1
-        ).expect("associating concept should pass");
-        
+        brain
+            .associate_concept("minuman", &["kopi".to_string(), "teh".to_string()], 1)
+            .expect("associating concept should pass");
+
         // 3. Generate respon untuk "kopi".
         // Karena "kopi" dan "teh" adalah anggota konsep "minuman",
         // relational traversal akan memungkinkan transisi ke "manis" via "teh"!
-        let response = brain.generate_response("kopi").expect("generation should pass");
-        
-        assert!(response.contains("manis"), "Response should traverse via concept node to 'manis', but got: {}", response);
+        let response = brain
+            .generate_response("kopi")
+            .expect("generation should pass");
+
+        assert!(
+            response.contains("manis"),
+            "Response should traverse via concept node to 'manis', but got: {}",
+            response
+        );
     }
 
     #[test]
     fn length_based_vocabulary_compression_rule() {
-        let mut config = BrainConfig::default();
-        config.word_promotion_threshold = 1;
-        config.dynamic_vocab = true;
+        let config = BrainConfig {
+            word_promotion_threshold: 1,
+            dynamic_vocab: true,
+            ..Default::default()
+        };
         let mut brain = BrainState::new(config).expect("brain should initialize");
 
         // 1. "xyzxyzxyz" is an out-of-vocabulary word.
         // Initially, BPE tokenizer decomposes it into character tokens (>3 tokens).
         let initial_tokens = brain.tokenizer.tokenize("xyzxyzxyz");
-        assert!(initial_tokens.len() > 3, "Initially it should decompose to many character tokens, got: {:?}", initial_tokens);
+        assert!(
+            initial_tokens.len() > 3,
+            "Initially it should decompose to many character tokens, got: {:?}",
+            initial_tokens
+        );
 
         // 2. Learn it. The compression rule detects it exceeds 3 tokens and registers it.
-        brain.learn_text("saya suka xyzxyzxyz").expect("learning should pass");
+        brain
+            .learn_text("saya suka xyzxyzxyz")
+            .expect("learning should pass");
 
         // 3. Tokenizing it now should return exactly ONE token ID.
         let compressed_tokens = brain.tokenizer.tokenize("xyzxyzxyz");
-        assert_eq!(compressed_tokens.len(), 1, "Should compress to exactly 1 token, got: {:?}", compressed_tokens);
+        assert_eq!(
+            compressed_tokens.len(),
+            1,
+            "Should compress to exactly 1 token, got: {:?}",
+            compressed_tokens
+        );
     }
 
     #[test]
     fn test_token_and_vocabulary_pruning() {
-        let mut config = BrainConfig::default();
-        config.dynamic_vocab = true;
-        config.prune_interval = 2; // stale_after = 8
+        let config = BrainConfig {
+            dynamic_vocab: true,
+            prune_interval: 2, // stale_after = 8
+            ..Default::default()
+        };
         let mut brain = BrainState::new(config).expect("brain should initialize");
 
         // Learn a token
-        brain.learn_text("saya suka kopi").expect("learning should pass");
-        
+        brain
+            .learn_text("saya suka kopi")
+            .expect("learning should pass");
+
         // Find a word token that we just learned, e.g., "kopi"
-        let token_id = brain.tokenizer.lookup.get("▁kopi").copied().expect("token 'kopi' should exist");
-        
+        let token_id = brain
+            .tokenizer
+            .lookup
+            .get("▁kopi")
+            .copied()
+            .expect("token 'kopi' should exist");
+
         // Ensure it is in the entries
         assert!(brain.tokenizer.entries.contains_key(&token_id));
         assert!(brain.nodes.contains_key(&token_id));
@@ -399,23 +475,45 @@ mod tests {
         let (_pruned_edges, pruned_nodes) = brain.prune_graph(10);
 
         // Verify the token is masked in tokenizer and graph nodes!
-        assert!(brain.tokenizer.entries.get(&token_id).map_or(false, |e| e.masked), "Token should be masked in tokenizer");
-        assert!(brain.tokenizer.lookup.contains_key("▁kopi"), "Token lookup should still exist (memory/ram consequence)");
-        assert!(brain.nodes.get(&token_id).map_or(false, |n| n.masked), "Token node should be masked in graph");
+        assert!(
+            brain
+                .tokenizer
+                .entries
+                .get(&token_id)
+                .is_some_and(|e| e.masked),
+            "Token should be masked in tokenizer"
+        );
+        assert!(
+            brain.tokenizer.lookup.contains_key("▁kopi"),
+            "Token lookup should still exist (memory/ram consequence)"
+        );
+        assert!(
+            brain.nodes.get(&token_id).is_some_and(|n| n.masked),
+            "Token node should be masked in graph"
+        );
         assert!(pruned_nodes >= 1, "Should report at least 1 node masked");
     }
 
     #[test]
     fn test_generation_resurrects_pruned_tokens() {
-        let mut config = BrainConfig::default();
-        config.dynamic_vocab = true;
+        let config = BrainConfig {
+            dynamic_vocab: true,
+            ..Default::default()
+        };
         let mut brain = BrainState::new(config).expect("brain should initialize");
 
         // Learn a dialogue pair using train_pair
-        brain.train_pair("nama kamu", "saya kopi").expect("learning should pass");
+        brain
+            .train_pair("nama kamu", "saya kopi")
+            .expect("learning should pass");
 
         // Find the token ID for "kopi"
-        let token_id = brain.tokenizer.lookup.get("▁kopi").copied().expect("token 'kopi' should exist");
+        let token_id = brain
+            .tokenizer
+            .lookup
+            .get("▁kopi")
+            .copied()
+            .expect("token 'kopi' should exist");
 
         // Manually delete the token and node, simulating full pruning!
         brain.tokenizer.entries.remove(&token_id);
@@ -426,14 +524,119 @@ mod tests {
         assert!(!brain.nodes.contains_key(&token_id));
 
         // Generate response for "nama kamu" - should succeed and decode successfully via lookup resurrection!
-        let response = brain.generate_response("nama kamu").expect("Generation should succeed");
-        assert!(response.contains("kopi"), "Response should contain 'kopi', got: {}", response);
+        let response = brain
+            .generate_response("nama kamu")
+            .expect("Generation should succeed");
+        assert!(
+            response.contains("kopi"),
+            "Response should contain 'kopi', got: {}",
+            response
+        );
 
         // Run interact or learn_text with "kopi" - this triggers touch_token and activate_node, physical resurrection!
-        brain.interact("saya kopi").expect("interaction should pass");
+        brain
+            .interact("saya kopi")
+            .expect("interaction should pass");
 
         // Verify the token and node have been physically resurrected in entries and nodes!
-        assert!(brain.tokenizer.entries.contains_key(&token_id), "Token should be physically resurrected in tokenizer");
-        assert!(brain.nodes.contains_key(&token_id), "Node should be physically resurrected in graph nodes");
+        assert!(
+            brain.tokenizer.entries.contains_key(&token_id),
+            "Token should be physically resurrected in tokenizer"
+        );
+        assert!(
+            brain.nodes.contains_key(&token_id),
+            "Node should be physically resurrected in graph nodes"
+        );
+    }
+
+    #[test]
+    fn action_selection_prefers_exact_recall() {
+        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+        brain
+            .train_pair("siapa kamu", "saya brain lokal")
+            .expect("training pair should pass");
+        brain
+            .learn_text("siapa kamu adalah pertanyaan identitas")
+            .expect("learning should pass");
+
+        let selection = brain
+            .generate_action_selection("siapa kamu")
+            .expect("selection should pass");
+
+        assert_eq!(selection.chosen.source, ResponseActionSource::ExactRecall);
+        assert!(selection.chosen.response.contains("brain lokal"));
+    }
+
+    #[test]
+    fn interact_populates_brain_native_memories() {
+        let config = BrainConfig {
+            replay_interval: 1,
+            ..Default::default()
+        };
+        let mut brain = BrainState::new(config).expect("brain should initialize");
+        brain
+            .train_pair("halo", "halo juga")
+            .expect("training pair should pass");
+
+        let interaction = brain.interact("halo").expect("interaction should pass");
+
+        assert_eq!(
+            interaction.response_source,
+            ResponseActionSource::ExactRecall
+        );
+        assert_eq!(brain.sensory_memory.len(), 1);
+        assert_eq!(brain.episodic_memory.len(), 1);
+        assert!(!brain.procedural_memory.is_empty());
+        assert!(!brain.working_memory.active_token_ids.is_empty());
+        assert!(interaction.replayed_episodes >= 1);
+    }
+
+    #[test]
+    fn arithmetic_examples_create_generalizable_procedure() {
+        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+        brain
+            .learn_text("2 + 3 = 5")
+            .expect("equation learning should pass");
+        brain
+            .learn_text("4 + 2 = 6")
+            .expect("equation learning should pass");
+
+        let selection = brain
+            .generate_action_selection("berapa 5 + 6")
+            .expect("selection should pass");
+
+        assert_eq!(
+            selection.chosen.source,
+            ResponseActionSource::ProceduralReasoning
+        );
+        assert!(selection.chosen.response.contains("11"));
+        assert!(brain.procedure_schemas.contains_key("procedure:addition"));
+    }
+
+    #[test]
+    fn working_memory_tracks_goals_tone_and_prediction_error() {
+        let mut brain = BrainState::new(BrainConfig::default()).expect("brain should initialize");
+        brain
+            .train_pair("berapa 2 + 3", "5")
+            .expect("training pair should pass");
+
+        let interaction = brain
+            .interact("tolong hitung 8 + 4")
+            .expect("interaction should pass");
+
+        assert_eq!(
+            interaction.response_source,
+            ResponseActionSource::ProceduralReasoning
+        );
+        assert!(
+            brain
+                .working_memory
+                .predicted_procedures
+                .iter()
+                .any(|procedure| procedure == "procedure:addition")
+        );
+        assert!(!brain.working_memory.resolved_goals.is_empty());
+        assert_eq!(brain.working_memory.emotional_tone, "requesting");
+        assert!((0.0..=1.0).contains(&brain.working_memory.prediction_error));
     }
 }

@@ -26,22 +26,24 @@ impl RandomProjectionVector {
 
     pub fn aggregate(vectors: &[Self]) -> Self {
         if vectors.is_empty() {
-            return Self { values: vec![0.0; Self::DIM] };
+            return Self {
+                values: vec![0.0; Self::DIM],
+            };
         }
         let mut agg = vec![0.0; Self::DIM];
         for vec in vectors {
-            for i in 0..Self::DIM {
-                agg[i] += vec.values[i];
+            for (index, value) in agg.iter_mut().enumerate().take(Self::DIM) {
+                *value += vec.values[index];
             }
         }
         let mut sum_sq = 0.0;
-        for i in 0..Self::DIM {
-            sum_sq += agg[i] * agg[i];
+        for value in agg.iter().take(Self::DIM) {
+            sum_sq += value * value;
         }
         let norm = sum_sq.sqrt();
         if norm > 0.0 {
-            for i in 0..Self::DIM {
-                agg[i] /= norm;
+            for value in agg.iter_mut().take(Self::DIM) {
+                *value /= norm;
             }
         }
         Self { values: agg }
@@ -57,11 +59,7 @@ impl RandomProjectionVector {
             norm_b += other.values[i] * other.values[i];
         }
         let denom = (norm_a * norm_b).sqrt();
-        if denom > 0.0 {
-            dot / denom
-        } else {
-            0.0
-        }
+        if denom > 0.0 { dot / denom } else { 0.0 }
     }
 }
 

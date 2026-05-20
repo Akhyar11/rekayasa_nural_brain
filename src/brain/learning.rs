@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::cognition::{ProcedureKind, ProcedureSchema};
 use super::error::BrainError;
 use super::state::{
-    BrainEdge, BrainNode, BrainState, EdgeKind, NodeKind,
-    ContextPattern, UtteranceMemory,
+    BrainEdge, BrainNode, BrainState, ContextPattern, EdgeKind, NodeKind, UtteranceMemory,
 };
-use super::tokenizer::{collapse_whitespace, TokenLevel};
+use super::tokenizer::{TokenLevel, collapse_whitespace};
 
 #[derive(Clone, Debug)]
 pub struct LearningReport {
@@ -85,11 +85,8 @@ impl BrainState {
         bridge_learning.new_edges +=
             self.learn_transitions(&bridge_learning.token_ids, bridge_step);
         let bridge_token_ids = bridge_learning.token_ids.clone();
-        bridge_learning.new_edges += self.learn_context_patterns(
-            &bridge_token_ids,
-            bridge_step,
-            &mut bridge_learning,
-        )?;
+        bridge_learning.new_edges +=
+            self.learn_context_patterns(&bridge_token_ids, bridge_step, &mut bridge_learning)?;
 
         if bridge_step.is_multiple_of(self.config.prune_interval) {
             let (pruned_edges, pruned_nodes) = self.prune_graph(bridge_step);
@@ -98,6 +95,7 @@ impl BrainState {
         }
 
         self.store_prompt_response_pair(&prompt_text, &response_text);
+        self.learn_procedures_from_pair(&prompt_text, &response_text, bridge_step)?;
         self.training_example_count += 1;
 
         Ok(TrainingExampleReport {
@@ -171,9 +169,9 @@ impl BrainState {
             self.tokenizer.touch_token(*token_id, step_index)?;
         }
 
+        self.learn_procedures_from_text(&normalized_text, step_index)?;
         report.new_edges += self.learn_transitions(&token_ids, step_index);
-        report.new_edges +=
-            self.learn_context_patterns(&token_ids, step_index, &mut report)?;
+        report.new_edges += self.learn_context_patterns(&token_ids, step_index, &mut report)?;
         if remember_utterance {
             self.push_utterance(step_index, &normalized_text, token_ids);
         }
@@ -321,16 +319,16 @@ impl BrainState {
     pub fn learn_transitions(&mut self, token_ids: &[u64], interaction_index: u64) -> usize {
         let mut updates = 0;
         for window in token_ids.windows(2) {
-            if let [source, target] = window {
-                if self.strengthen_edge(
+            if let [source, target] = window
+                && self.strengthen_edge(
                     *source,
                     *target,
                     EdgeKind::Transition,
                     interaction_index,
                     1.0,
-                ) {
-                    updates += 1;
-                }
+                )
+            {
+                updates += 1;
             }
         }
         updates
@@ -439,7 +437,6 @@ impl BrainState {
         });
     }
 
-
     pub fn strengthen_edge(
         &mut self,
         source: u64,
@@ -463,7 +460,7 @@ impl BrainState {
             }
         });
         edge.masked = false;
- 
+
         // Kaidah asintotik: pertumbuhan hubungan non-linear (asymptotic/saturation)
         // dW = learning_rate * amount * (1.0 - W)
         let learning_rate = 0.4;
@@ -475,18 +472,41 @@ impl BrainState {
         is_new
     }
 
-    pub fn activate_node(&mut self, node_id: u64, interaction_index: u64) -> Result<(), BrainError> {
+    pub fn weaken_edge(&mut self, source: u64, target: u64, kind: EdgeKind, amount: f32) -> bool {
+        let key = edge_key(source, target, kind);
+        let Some(edge) = self.edges.get_mut(&key) else {
+            return false;
+        };
+
+        let learning_rate = 0.25;
+        let delta = learning_rate * amount.clamp(0.0, 1.0) * edge.strength;
+        edge.strength = (edge.strength - delta).clamp(0.0, 1.0);
+        if edge.strength <= self.config.min_edge_strength {
+            edge.masked = true;
+        }
+        true
+    }
+
+    pub fn activate_node(
+        &mut self,
+        node_id: u64,
+        interaction_index: u64,
+    ) -> Result<(), BrainError> {
         if !self.tokenizer.entries.contains_key(&node_id) {
-            let text = if let Some(t) = self.tokenizer.lookup.iter().find(|&(_, &id)| id == node_id).map(|(k, _)| k.clone()) {
+            let text = if let Some(t) = self
+                .tokenizer
+                .lookup
+                .iter()
+                .find(|&(_, &id)| id == node_id)
+                .map(|(k, _)| k.clone())
+            {
                 t
             } else {
                 format!("<REVIVED_{}>", node_id)
             };
             self.tokenizer.lookup.insert(text.clone(), node_id);
 
-            let level = if text.starts_with("<") {
-                super::tokenizer::TokenLevel::Sensor
-            } else if text.chars().count() <= 1 {
+            let level = if text.starts_with("<") || text.chars().count() <= 1 {
                 super::tokenizer::TokenLevel::Sensor
             } else if text.starts_with("▁") {
                 super::tokenizer::TokenLevel::Word
@@ -566,18 +586,103 @@ impl BrainState {
         }
     }
 
-    pub fn associate_concept(&mut self, concept_name: &str, member_terms: &[String], interaction_index: u64) -> Result<(), BrainError> {
+    pub fn learn_procedures_from_text(
+        &mut self,
+        normalized_text: &str,
+        interaction_index: u64,
+    ) -> Result<(), BrainError> {
+        if let Some(observation) = parse_arithmetic_observation(normalized_text) {
+            self.register_arithmetic_procedure(observation, interaction_index)?;
+        }
+        Ok(())
+    }
+
+    pub fn learn_procedures_from_pair(
+        &mut self,
+        prompt_text: &str,
+        response_text: &str,
+        interaction_index: u64,
+    ) -> Result<(), BrainError> {
+        if let Some(query) = parse_arithmetic_query(prompt_text)
+            && let Some(result) = parse_numeric_response(response_text)
+        {
+            self.register_arithmetic_procedure(
+                ArithmeticObservation {
+                    kind: query.kind,
+                    left: query.left,
+                    right: query.right,
+                    result,
+                },
+                interaction_index,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn register_arithmetic_procedure(
+        &mut self,
+        observation: ArithmeticObservation,
+        interaction_index: u64,
+    ) -> Result<(), BrainError> {
+        let Some(expected_result) =
+            compute_arithmetic(observation.kind, observation.left, observation.right)
+        else {
+            return Ok(());
+        };
+        if expected_result != observation.result {
+            return Ok(());
+        }
+
+        let schema_name = procedure_name(observation.kind).to_string();
+        {
+            let schema =
+                self.procedure_schemas
+                    .entry(schema_name.clone())
+                    .or_insert(ProcedureSchema {
+                        name: schema_name.clone(),
+                        kind: observation.kind,
+                        evidence_count: 0,
+                        use_count: 0,
+                        success_count: 0,
+                        total_reward: 0.0,
+                        last_used_at: interaction_index,
+                        last_prediction_error: 0.0,
+                    });
+            schema.evidence_count += 1;
+            schema.last_used_at = interaction_index;
+        }
+
+        self.associate_concept(
+            &schema_name,
+            &procedure_aliases(observation.kind),
+            interaction_index,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn associate_concept(
+        &mut self,
+        concept_name: &str,
+        member_terms: &[String],
+        interaction_index: u64,
+    ) -> Result<(), BrainError> {
         let concept_name_norm = normalize_input(concept_name)?;
-        
+
         // 1. Get or register the concept node
         let concept_token_id = if let Some(id) = self.tokenizer.get_token_id(&concept_name_norm) {
             id
         } else {
             let id = self.allocate_node_id();
-            self.tokenizer.register_token(id, &concept_name_norm, TokenLevel::Phrase, interaction_index);
+            self.tokenizer.register_token(
+                id,
+                &concept_name_norm,
+                TokenLevel::Phrase,
+                interaction_index,
+            );
             id
         };
-               let concept_node = self.nodes.entry(concept_token_id).or_insert(BrainNode {
+        let concept_node = self.nodes.entry(concept_token_id).or_insert(BrainNode {
             id: concept_token_id,
             label: concept_name_norm.clone(),
             kind: NodeKind::Concept,
@@ -589,7 +694,7 @@ impl BrainState {
         });
         concept_node.kind = NodeKind::Concept; // force it to be Concept kind if it wasn't
         concept_node.masked = false;
- 
+
         // 2. Register each member term and create a ConceptMember edge from the member to the concept
         for term in member_terms {
             let term_norm = normalize_input(term)?;
@@ -600,10 +705,11 @@ impl BrainState {
                 id
             } else {
                 let id = self.allocate_node_id();
-                self.tokenizer.register_token(id, &term_norm, TokenLevel::Word, interaction_index);
+                self.tokenizer
+                    .register_token(id, &term_norm, TokenLevel::Word, interaction_index);
                 id
             };
-            
+
             // Ensure the member node exists
             let member_node = self.nodes.entry(member_token_id).or_insert(BrainNode {
                 id: member_token_id,
@@ -616,7 +722,7 @@ impl BrainState {
                 masked: false,
             });
             member_node.masked = false;
- 
+
             // Create EdgeKind::ConceptMember from member to concept
             let edge_key = edge_key(member_token_id, concept_token_id, EdgeKind::ConceptMember);
             let edge = self.edges.entry(edge_key).or_insert(BrainEdge {
@@ -630,7 +736,7 @@ impl BrainState {
             });
             edge.masked = false;
         }
-        
+
         Ok(())
     }
 
@@ -742,4 +848,141 @@ pub fn context_key(token_ids: &[u64]) -> String {
 
 pub fn edge_key(source: u64, target: u64, kind: EdgeKind) -> String {
     format!("{source}:{target}:{kind:?}")
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ArithmeticObservation {
+    pub kind: ProcedureKind,
+    pub left: i64,
+    pub right: i64,
+    pub result: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ArithmeticQuery {
+    pub kind: ProcedureKind,
+    pub left: i64,
+    pub right: i64,
+}
+
+pub fn parse_arithmetic_observation(text: &str) -> Option<ArithmeticObservation> {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    for window in tokens.windows(5) {
+        let [left, operator, right, equals, result] = window else {
+            continue;
+        };
+        if *equals != "=" {
+            continue;
+        }
+        let left = parse_i64_token(left)?;
+        let right = parse_i64_token(right)?;
+        let result = parse_i64_token(result)?;
+        let kind = operator_to_kind(operator)?;
+        return Some(ArithmeticObservation {
+            kind,
+            left,
+            right,
+            result,
+        });
+    }
+    None
+}
+
+pub fn parse_arithmetic_query(text: &str) -> Option<ArithmeticQuery> {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    for window in tokens.windows(3) {
+        let [left, operator, right] = window else {
+            continue;
+        };
+        let left = match parse_i64_token(left) {
+            Some(value) => value,
+            None => continue,
+        };
+        let right = match parse_i64_token(right) {
+            Some(value) => value,
+            None => continue,
+        };
+        let kind = match operator_to_kind(operator) {
+            Some(value) => value,
+            None => continue,
+        };
+        return Some(ArithmeticQuery { kind, left, right });
+    }
+    None
+}
+
+pub fn parse_numeric_response(text: &str) -> Option<i64> {
+    let values: Vec<i64> = text
+        .split_whitespace()
+        .filter_map(parse_i64_token)
+        .collect();
+    if values.len() == 1 {
+        values.first().copied()
+    } else {
+        None
+    }
+}
+
+pub fn compute_arithmetic(kind: ProcedureKind, left: i64, right: i64) -> Option<i64> {
+    match kind {
+        ProcedureKind::ArithmeticAddition => Some(left + right),
+        ProcedureKind::ArithmeticSubtraction => Some(left - right),
+        ProcedureKind::ArithmeticMultiplication => Some(left * right),
+        ProcedureKind::ArithmeticDivision => {
+            if right == 0 || left % right != 0 {
+                None
+            } else {
+                Some(left / right)
+            }
+        }
+    }
+}
+
+pub fn procedure_name(kind: ProcedureKind) -> &'static str {
+    match kind {
+        ProcedureKind::ArithmeticAddition => "procedure:addition",
+        ProcedureKind::ArithmeticSubtraction => "procedure:subtraction",
+        ProcedureKind::ArithmeticMultiplication => "procedure:multiplication",
+        ProcedureKind::ArithmeticDivision => "procedure:division",
+    }
+}
+
+pub fn procedure_aliases(kind: ProcedureKind) -> Vec<String> {
+    match kind {
+        ProcedureKind::ArithmeticAddition => vec![
+            "+".to_string(),
+            "tambah".to_string(),
+            "jumlah".to_string(),
+            "plus".to_string(),
+        ],
+        ProcedureKind::ArithmeticSubtraction => vec![
+            "-".to_string(),
+            "kurang".to_string(),
+            "selisih".to_string(),
+            "minus".to_string(),
+        ],
+        ProcedureKind::ArithmeticMultiplication => vec![
+            "*".to_string(),
+            "x".to_string(),
+            "kali".to_string(),
+            "produk".to_string(),
+        ],
+        ProcedureKind::ArithmeticDivision => {
+            vec!["/".to_string(), "bagi".to_string(), "quotient".to_string()]
+        }
+    }
+}
+
+fn parse_i64_token(token: &str) -> Option<i64> {
+    token.parse::<i64>().ok()
+}
+
+fn operator_to_kind(token: &str) -> Option<ProcedureKind> {
+    match token {
+        "+" => Some(ProcedureKind::ArithmeticAddition),
+        "-" => Some(ProcedureKind::ArithmeticSubtraction),
+        "*" | "x" => Some(ProcedureKind::ArithmeticMultiplication),
+        "/" => Some(ProcedureKind::ArithmeticDivision),
+        _ => None,
+    }
 }
